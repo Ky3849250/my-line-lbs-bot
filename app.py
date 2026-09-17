@@ -1,8 +1,12 @@
 import os
 import math
 import requests
-from flask import Flask, request, abort
+import urllib3
+from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
+
+# 關閉 SSL 不安全連線的警告訊息（避免 Log 被警告洗版）
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -18,20 +22,16 @@ app = Flask(__name__)
 
 channel_secret = os.getenv('LINE_CHANNEL_SECRET')
 channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+liff_id = os.getenv('LINE_LIFF_ID', '')  # LIFF ID
 
 handler = WebhookHandler(channel_secret)
 configuration = Configuration(access_token=channel_access_token)
 
-# 儲存使用者選擇的查詢類別 (Key: user_id, Value: target_type)
 user_search_state = {}
 
 def calculate_distance(origin_latitude: float, origin_longitude: float, 
                        destination_latitude: float, destination_longitude: float) -> float:
-    """
-    使用 Haversine 公式計算兩組經緯度之間的直線物理距離（單位：公尺）
-    """
     earth_radius_meters = 6371000.0
-    
     phi_origin = math.radians(origin_latitude)
     phi_destination = math.radians(destination_latitude)
     delta_phi = math.radians(destination_latitude - origin_latitude)
@@ -40,12 +40,10 @@ def calculate_distance(origin_latitude: float, origin_longitude: float,
     haversine_a = (math.sin(delta_phi / 2.0) ** 2 + 
                    math.cos(phi_origin) * math.cos(phi_destination) * math.sin(delta_lambda / 2.0) ** 2)
     haversine_c = 2.0 * math.atan2(math.sqrt(haversine_a), math.sqrt(1.0 - haversine_a))
-    
     return earth_radius_meters * haversine_c
 
 
 def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
-    """ 擷取 YouBike 2.0 即時開放資料 """
     youbike_results = []
     try:
         youbike_api_url = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
@@ -56,128 +54,90 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
         for station in youbike_data_list:
             raw_latitude = station.get("latitude") or station.get("lat") or 0.0
             raw_longitude = station.get("longitude") or station.get("lng") or 0.0
-            
-            station_latitude = float(raw_latitude)
-            station_longitude = float(raw_longitude)
+            station_latitude, station_longitude = float(raw_latitude), float(raw_longitude)
             
             if station_latitude == 0.0 or station_longitude == 0.0:
                 continue
             
-            distance_meters = calculate_distance(
-                user_latitude, user_longitude, 
-                station_latitude, station_longitude
-            )
-            
+            distance_meters = calculate_distance(user_latitude, user_longitude, station_latitude, station_longitude)
             if distance_meters <= 1000.0:
-                raw_station_name = station.get("sna", "YouBike 站點")
-                formatted_station_name = raw_station_name.replace("YouBike2.0_", "")
-                
+                formatted_station_name = station.get("sna", "YouBike 站點").replace("YouBike2.0_", "")
                 available_bikes = int(station.get("available_rent_bikes") or station.get("sbi") or 0)
                 empty_spaces = int(station.get("available_return_bikes") or station.get("bemp") or 0)
                 
                 youbike_results.append({
-                    "name": formatted_station_name,
-                    "type": "🚲 YouBike",
-                    "latitude": station_latitude,
-                    "longitude": station_longitude,
+                    "name": formatted_station_name, "type": "🚲 YouBike",
+                    "latitude": station_latitude, "longitude": station_longitude,
                     "distance": round(distance_meters),
-                    "extra_info": f"可借: {available_bikes} 輛 | 可還: {empty_spaces} 格",
-                    "is_available": available_bikes > 0
+                    "extra_info": f"可借: {available_bikes} 輛 | 可還: {empty_spaces} 格"
                 })
     except Exception as error_exception:
         print(f"YouBike API 讀取異常: {error_exception}")
-        
     return youbike_results
 
 
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
-    """ 擷取台北市公廁開放資料 """
     toilet_results = []
     try:
         public_toilet_api_url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=1000"
-        response = requests.get(public_toilet_api_url, timeout=5)
+        response = requests.get(public_toilet_api_url, timeout=5, verify=False)
         response.raise_for_status()
-        data_json = response.json()
-        
-        toilet_data_list = data_json.get("result", {}).get("results", [])
+        toilet_data_list = response.json().get("result", {}).get("results", [])
         
         for toilet in toilet_data_list:
             raw_latitude = toilet.get("緯度") or toilet.get("latitude") or 0.0
             raw_longitude = toilet.get("經度") or toilet.get("longitude") or 0.0
-            
-            toilet_latitude = float(raw_latitude)
-            toilet_longitude = float(raw_longitude)
+            toilet_latitude, toilet_longitude = float(raw_latitude), float(raw_longitude)
             
             if toilet_latitude == 0.0 or toilet_longitude == 0.0:
                 continue
                 
-            distance_meters = calculate_distance(
-                user_latitude, user_longitude, 
-                toilet_latitude, toilet_longitude
-            )
-            
+            distance_meters = calculate_distance(user_latitude, user_longitude, toilet_latitude, toilet_longitude)
             if distance_meters <= 1000.0:
-                toilet_name = toilet.get("公廁名稱") or "公共廁所"
-                toilet_grade = toilet.get("等級") or "優良"
-                
                 toilet_results.append({
-                    "name": toilet_name,
-                    "type": "🚻 公廁",
-                    "latitude": toilet_latitude,
-                    "longitude": toilet_longitude,
+                    "name": toilet.get("公廁名稱") or "公共廁所", "type": "🚻 公廁",
+                    "latitude": toilet_latitude, "longitude": toilet_longitude,
                     "distance": round(distance_meters),
-                    "extra_info": f"環境評等: {toilet_grade}",
-                    "is_available": True
+                    "extra_info": f"環境評等: {toilet.get('等級') or '優良'}"
                 })
     except Exception as error_exception:
         print(f"公廁 API 讀取異常: {error_exception}")
-        
     return toilet_results
 
 
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
-    """ 擷取台北市 AED 自動體外心臟去顫器設置點開放資料 """
     aed_results = []
     try:
         aed_api_url = "https://data.taipei/api/v1/dataset/cd050577-115f-4299-b37a-012ff490a632?scope=resourceAquire&limit=1000"
         response = requests.get(aed_api_url, timeout=5)
         response.raise_for_status()
-        data_json = response.json()
-        
-        aed_data_list = data_json.get("result", {}).get("results", [])
+        aed_data_list = response.json().get("result", {}).get("results", [])
         
         for aed in aed_data_list:
             raw_latitude = aed.get("緯度") or aed.get("latitude") or 0.0
             raw_longitude = aed.get("經度") or aed.get("longitude") or 0.0
-            
-            aed_latitude = float(raw_latitude)
-            aed_longitude = float(raw_longitude)
+            aed_latitude, aed_longitude = float(raw_latitude), float(raw_longitude)
             
             if aed_latitude == 0.0 or aed_longitude == 0.0:
                 continue
                 
-            distance_meters = calculate_distance(
-                user_latitude, user_longitude, 
-                aed_latitude, aed_longitude
-            )
-            
+            distance_meters = calculate_distance(user_latitude, user_longitude, aed_latitude, aed_longitude)
             if distance_meters <= 1000.0:
-                aed_place_name = aed.get("場所名稱") or "AED 急救站"
-                aed_location_description = aed.get("AED放置地點") or aed.get("AED地點描述") or "詳見現場標示"
-                
                 aed_results.append({
-                    "name": aed_place_name,
-                    "type": "🆘 AED",
-                    "latitude": aed_latitude,
-                    "longitude": aed_longitude,
+                    "name": aed.get("場所名稱") or "AED 急救站", "type": "🆘 AED",
+                    "latitude": aed_latitude, "longitude": aed_longitude,
                     "distance": round(distance_meters),
-                    "extra_info": f"放置位置: {aed_location_description}",
-                    "is_available": True
+                    "extra_info": f"位置: {aed.get('AED放置地點') or '詳見現場標示'}"
                 })
     except Exception as error_exception:
         print(f"AED API 讀取異常: {error_exception}")
-        
     return aed_results
+
+
+# WEB 端點：伺服 LIFF 地圖網頁
+@app.route("/liff/map", methods=['GET'])
+def liff_map_page():
+    return render_template("map.html")
 
 
 @app.route("/callback", methods=['POST'])
@@ -226,7 +186,6 @@ def handle_location_message(event):
     user_longitude = event.message.longitude
     target_type = user_search_state.get(user_id, "🚻 公廁")
     
-    # 根據使用者選擇的目標類別，呼叫對應的 API 擷取真實資料
     if target_type == "🚲 YouBike":
         search_results = fetch_youbike_data(user_latitude, user_longitude)
     elif target_type == "🚻 公廁":
@@ -236,7 +195,6 @@ def handle_location_message(event):
     else:
         search_results = []
 
-    # 依照距離遠近進行排序，並截取前 10 筆最近結果
     search_results.sort(key=lambda item: item["distance"])
     search_results = search_results[:10]
     
@@ -251,6 +209,13 @@ def handle_location_message(event):
             for item in search_results:
                 google_navigation_url = f"https://www.google.com/maps/dir/?api=1&destination={item['latitude']},{item['longitude']}"
                 
+                # 建立 LIFF 半版地圖 URL (帶入地點資訊)
+                if liff_id:
+                    liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={item['name']}"
+                else:
+                    # 若尚未設定 LIFF ID，先導向全網址備用
+                    liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={item['name']}"
+
                 body_contents = [
                     {"type": "text", "text": item["type"], "weight": "bold", "size": "xs", "color": "#00B900"},
                     {"type": "text", "text": item["name"], "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
@@ -265,7 +230,18 @@ def handle_location_message(event):
                     "footer": {
                         "type": "box", 
                         "layout": "vertical",
+                        "spacing": "sm",
                         "contents": [
+                            {
+                                "type": "button", 
+                                "action": {
+                                    "type": "uri", 
+                                    "label": "📍 地圖預覽", 
+                                    "uri": liff_map_url
+                                }, 
+                                "style": "secondary", 
+                                "height": "sm"
+                            },
                             {
                                 "type": "button", 
                                 "action": {
