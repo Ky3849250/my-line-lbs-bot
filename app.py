@@ -5,9 +5,6 @@ import urllib3
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
 
-# 關閉 SSL 不安全連線的警告訊息（避免 Log 被警告洗版）
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -17,17 +14,37 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessageContent
 
+# 關閉 SSL 不安全連線警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 load_dotenv()
 app = Flask(__name__)
 
 channel_secret = os.getenv('LINE_CHANNEL_SECRET')
 channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-liff_id = os.getenv('LINE_LIFF_ID', '')  # LIFF ID
+# 自動去除前後可能多複製到的空白格
+liff_id = (os.getenv('LINE_LIFF_ID') or '').strip()
 
 handler = WebhookHandler(channel_secret)
 configuration = Configuration(access_token=channel_access_token)
 
 user_search_state = {}
+
+def safe_parse_json_list(raw_json_data) -> list:
+    """ 通用容錯解析器：無論 API 回傳 List 或 Dict，皆能安全取出資料清單 """
+    if isinstance(raw_json_data, list):
+        return raw_json_data
+    elif isinstance(raw_json_data, dict):
+        result = raw_json_data.get("result")
+        if isinstance(result, dict):
+            return result.get("results", [])
+        elif isinstance(result, list):
+            return result
+        elif "results" in raw_json_data and isinstance(raw_json_data["results"], list):
+            return raw_json_data["results"]
+        elif "data" in raw_json_data and isinstance(raw_json_data["data"], list):
+            return raw_json_data["data"]
+    return []
 
 def calculate_distance(origin_latitude: float, origin_longitude: float, 
                        destination_latitude: float, destination_longitude: float) -> float:
@@ -47,11 +64,14 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
     youbike_results = []
     try:
         youbike_api_url = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
-        response = requests.get(youbike_api_url, timeout=5)
+        response = requests.get(youbike_api_url, timeout=5, verify=False)
         response.raise_for_status()
-        youbike_data_list = response.json()
+        
+        youbike_data_list = safe_parse_json_list(response.json())
         
         for station in youbike_data_list:
+            if not isinstance(station, dict):
+                continue
             raw_latitude = station.get("latitude") or station.get("lat") or 0.0
             raw_longitude = station.get("longitude") or station.get("lng") or 0.0
             station_latitude, station_longitude = float(raw_latitude), float(raw_longitude)
@@ -60,8 +80,8 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
                 continue
             
             distance_meters = calculate_distance(user_latitude, user_longitude, station_latitude, station_longitude)
-            if distance_meters <= 1000.0:
-                formatted_station_name = station.get("sna", "YouBike 站點").replace("YouBike2.0_", "")
+            if distance_meters <= 3000.0:
+                formatted_station_name = str(station.get("sna", "YouBike 站點")).replace("YouBike2.0_", "")
                 available_bikes = int(station.get("available_rent_bikes") or station.get("sbi") or 0)
                 empty_spaces = int(station.get("available_return_bikes") or station.get("bemp") or 0)
                 
@@ -79,13 +99,15 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
     toilet_results = []
     try:
-        # 修改點 1：將 limit=1000 改為 limit=10000，抓取更完整的資料
         public_toilet_api_url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=10000"
         response = requests.get(public_toilet_api_url, timeout=5, verify=False)
         response.raise_for_status()
-        toilet_data_list = response.json().get("result", {}).get("results", [])
+        
+        toilet_data_list = safe_parse_json_list(response.json())
         
         for toilet in toilet_data_list:
+            if not isinstance(toilet, dict):
+                continue
             raw_latitude = toilet.get("緯度") or toilet.get("latitude") or 0.0
             raw_longitude = toilet.get("經度") or toilet.get("longitude") or 0.0
             toilet_latitude, toilet_longitude = float(raw_latitude), float(raw_longitude)
@@ -94,10 +116,9 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
                 continue
                 
             distance_meters = calculate_distance(user_latitude, user_longitude, toilet_latitude, toilet_longitude)
-            # 修改點 2：放寬到方圓 3000 公尺 (3公里)
             if distance_meters <= 3000.0:
                 toilet_results.append({
-                    "name": toilet.get("公廁名稱") or "公共廁所", "type": "🚻 公廁",
+                    "name": str(toilet.get("公廁名稱") or "公共廁所"), "type": "🚻 公廁",
                     "latitude": toilet_latitude, "longitude": toilet_longitude,
                     "distance": round(distance_meters),
                     "extra_info": f"環境評等: {toilet.get('等級') or '優良'}"
@@ -110,13 +131,15 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
     aed_results = []
     try:
-        # 修改點 1：將 limit=1000 改為 limit=10000
         aed_api_url = "https://data.taipei/api/v1/dataset/cd050577-115f-4299-b37a-012ff490a632?scope=resourceAquire&limit=10000"
         response = requests.get(aed_api_url, timeout=5, verify=False)
         response.raise_for_status()
-        aed_data_list = response.json().get("result", {}).get("results", [])
+        
+        aed_data_list = safe_parse_json_list(response.json())
         
         for aed in aed_data_list:
+            if not isinstance(aed, dict):
+                continue
             raw_latitude = aed.get("緯度") or aed.get("latitude") or 0.0
             raw_longitude = aed.get("經度") or aed.get("longitude") or 0.0
             aed_latitude, aed_longitude = float(raw_latitude), float(raw_longitude)
@@ -125,10 +148,9 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
                 continue
                 
             distance_meters = calculate_distance(user_latitude, user_longitude, aed_latitude, aed_longitude)
-            # 修改點 2：放寬到方圓 3000 公尺 (3公里)
             if distance_meters <= 3000.0:
                 aed_results.append({
-                    "name": aed.get("場所名稱") or "AED 急救站", "type": "🆘 AED",
+                    "name": str(aed.get("場所名稱") or "AED 急救站"), "type": "🆘 AED",
                     "latitude": aed_latitude, "longitude": aed_longitude,
                     "distance": round(distance_meters),
                     "extra_info": f"位置: {aed.get('AED放置地點') or '詳見現場標示'}"
@@ -138,7 +160,6 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
     return aed_results
 
 
-# WEB 端點：伺服 LIFF 地圖網頁
 @app.route("/liff/map", methods=['GET'])
 def liff_map_page():
     return render_template("map.html")
@@ -206,18 +227,18 @@ def handle_location_message(event):
         line_bot_api = MessagingApi(api_client)
         
         if not search_results:
-            reply_messages = [TextMessage(text=f"方圓 1 公里內找不到【{target_type}】。")]
+            reply_messages = [TextMessage(text=f"方圓 3 公里內找不到【{target_type}】。")]
         else:
             carousel_contents = {"type": "carousel", "contents": []}
             
             for item in search_results:
                 google_navigation_url = f"https://www.google.com/maps/dir/?api=1&destination={item['latitude']},{item['longitude']}"
                 
-                # 建立 LIFF 半版地圖 URL (帶入地點資訊)
+                # 判斷是否成功讀取 LINE_LIFF_ID
                 if liff_id:
                     liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={item['name']}"
                 else:
-                    # 若尚未設定 LIFF ID，先導向全網址備用
+                    print("【系統警告】未檢測到 LINE_LIFF_ID 環境變數，回退至普通網頁模式！")
                     liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={item['name']}"
 
                 body_contents = [
