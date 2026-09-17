@@ -79,7 +79,8 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
     toilet_results = []
     try:
-        public_toilet_api_url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=1000"
+        # 修改點 1：將 limit=1000 改為 limit=10000，抓取更完整的資料
+        public_toilet_api_url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=10000"
         response = requests.get(public_toilet_api_url, timeout=5, verify=False)
         response.raise_for_status()
         toilet_data_list = response.json().get("result", {}).get("results", [])
@@ -93,7 +94,8 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
                 continue
                 
             distance_meters = calculate_distance(user_latitude, user_longitude, toilet_latitude, toilet_longitude)
-            if distance_meters <= 1000.0:
+            # 修改點 2：放寬到方圓 3000 公尺 (3公里)
+            if distance_meters <= 3000.0:
                 toilet_results.append({
                     "name": toilet.get("公廁名稱") or "公共廁所", "type": "🚻 公廁",
                     "latitude": toilet_latitude, "longitude": toilet_longitude,
@@ -108,8 +110,9 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
     aed_results = []
     try:
-        aed_api_url = "https://data.taipei/api/v1/dataset/cd050577-115f-4299-b37a-012ff490a632?scope=resourceAquire&limit=1000"
-        response = requests.get(aed_api_url, timeout=5)
+        # 修改點 1：將 limit=1000 改為 limit=10000
+        aed_api_url = "https://data.taipei/api/v1/dataset/cd050577-115f-4299-b37a-012ff490a632?scope=resourceAquire&limit=10000"
+        response = requests.get(aed_api_url, timeout=5, verify=False)
         response.raise_for_status()
         aed_data_list = response.json().get("result", {}).get("results", [])
         
@@ -122,7 +125,8 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
                 continue
                 
             distance_meters = calculate_distance(user_latitude, user_longitude, aed_latitude, aed_longitude)
-            if distance_meters <= 1000.0:
+            # 修改點 2：放寬到方圓 3000 公尺 (3公里)
+            if distance_meters <= 3000.0:
                 aed_results.append({
                     "name": aed.get("場所名稱") or "AED 急救站", "type": "🆘 AED",
                     "latitude": aed_latitude, "longitude": aed_longitude,
