@@ -1,5 +1,6 @@
 import os
 import math
+import json
 import requests
 import urllib3
 import urllib.parse
@@ -33,48 +34,88 @@ REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
-# 多行政區涵蓋之公廁開放資料庫（保障海外 IP 封鎖時仍可精準進行全區距離運算）
-FULL_PUBLIC_TOILETS = [
-    {"name": "捷運台北車站無障礙公廁", "latitude": 25.0478, "longitude": 121.5170, "extra": "環境評等: 特優級"},
-    {"name": "捷運中山站公共廁所", "latitude": 25.0531, "longitude": 121.5205, "extra": "環境評等: 特優級"},
-    {"name": "捷運西門站公廁", "latitude": 25.0421, "longitude": 121.5080, "extra": "環境評等: 特優級"},
-    {"name": "捷運東門站公廁", "latitude": 25.0338, "longitude": 121.5285, "extra": "環境評等: 優良"},
-    {"name": "捷運大安站公廁", "latitude": 25.0329, "longitude": 121.5435, "extra": "環境評等: 特優級"},
-    {"name": "捷運市政府站公廁", "latitude": 25.0405, "longitude": 121.5650, "extra": "環境評等: 特優級"},
-    {"name": "捷運松山站公廁", "latitude": 25.0501, "longitude": 121.5775, "extra": "環境評等: 優良"},
-    {"name": "大安森林公園1號公廁", "latitude": 25.0300, "longitude": 121.5350, "extra": "環境評等: 優良"},
-    {"name": "信義區威秀影城公廁", "latitude": 25.0355, "longitude": 121.5665, "extra": "環境評等: 特優級"},
-    {"name": "捷運公館站公廁", "latitude": 25.0136, "longitude": 121.5341, "extra": "環境評等: 優良"},
-    {"name": "捷運士林站公廁", "latitude": 25.0932, "longitude": 121.5262, "extra": "環境評等: 特優級"},
-    {"name": "捷運內湖站公廁", "latitude": 25.0838, "longitude": 121.5940, "extra": "環境評等: 優良"},
-    {"name": "捷運新北投站公廁", "latitude": 25.1365, "longitude": 121.5030, "extra": "環境評等: 特優級"}
-]
+# ==========================================
+# 核心升級：啟動時將全台 15,506 筆 AED 載入記憶體
+# ==========================================
+LOCAL_AED_DATABASE = []
+AED_JSON_PATH = os.path.join(os.path.dirname(__file__), "aed.json")
 
-# 多行政區涵蓋之 AED 開放資料庫
-FULL_AED_STATIONS = [
-    {"name": "臺北車站 1樓大廳服務台 AED", "latitude": 25.0478, "longitude": 121.5170, "extra": "位置: 1樓中央諮詢服務台旁"},
-    {"name": "捷運中山站 穿堂層 AED", "latitude": 25.0531, "longitude": 121.5205, "extra": "位置: 詢問處旁"},
-    {"name": "捷運西門站 站務中心 AED", "latitude": 25.0420, "longitude": 121.5085, "extra": "位置: 6號出口穿堂層"},
-    {"name": "台大醫院 東址大樓門廳 AED", "latitude": 25.0408, "longitude": 121.5188, "extra": "位置: 一樓大廳服務台"},
-    {"name": "捷運市政府站 轉運站大廳 AED", "latitude": 25.0405, "longitude": 121.5650, "extra": "位置: 2號出口剪票口旁"},
-    {"name": "台北101觀景台售票處 AED", "latitude": 25.0339, "longitude": 121.5645, "extra": "位置: 5樓觀景台售票入口"},
-    {"name": "捷運松山站 穿堂層 AED", "latitude": 25.0501, "longitude": 121.5775, "extra": "位置: 閘門旁服務台"},
-    {"name": "國立臺灣大學 總圖書館 AED", "latitude": 25.0172, "longitude": 121.5405, "extra": "位置: 一樓大門入口處"},
-    {"name": "捷運士林站 穿堂層 AED", "latitude": 25.0932, "longitude": 121.5262, "extra": "位置: 1號出口詢問處旁"},
-    {"name": "捷運港墘站 穿堂層 AED", "latitude": 25.0800, "longitude": 121.5750, "extra": "位置: 剪票口旁"}
-]
+if os.path.exists(AED_JSON_PATH):
+    try:
+        with open(AED_JSON_PATH, "r", encoding="utf-8") as f:
+            LOCAL_AED_DATABASE = json.load(f)
+            print(f"【成功載入】全台 AED 資料庫共 {len(LOCAL_AED_DATABASE)} 筆紀錄。")
+    except Exception as e:
+        print(f"【載入失敗】aed.json 讀取異常: {e}")
+else:
+    print("【警告】未找到 aed.json 檔案，請確認已放入專案目錄！")
+
 
 def calculate_distance(origin_latitude: float, origin_longitude: float, 
                        destination_latitude: float, destination_longitude: float) -> float:
+    """ 使用 Haversine 公式計算球面直線距離（公尺） """
     earth_radius_meters = 6371000.0
     phi_origin = math.radians(origin_latitude)
     phi_destination = math.radians(destination_latitude)
     delta_phi = math.radians(destination_latitude - origin_latitude)
     delta_lambda = math.radians(destination_longitude - origin_longitude)
+    
     haversine_a = (math.sin(delta_phi / 2.0) ** 2 + 
                    math.cos(phi_origin) * math.cos(phi_destination) * math.sin(delta_lambda / 2.0) ** 2)
     haversine_c = 2.0 * math.atan2(math.sqrt(haversine_a), math.sqrt(1.0 - haversine_a))
     return earth_radius_meters * haversine_c
+
+
+def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
+    """ 全局精確比對：從完整資料庫中運算並篩選出真正最近的 AED 項目 """
+    aed_results = []
+    
+    # 若本地完整資料庫可用，優先進行全局內存運算（確保零遺漏與零逾時）
+    source_data = LOCAL_AED_DATABASE
+    
+    # 若本地庫無資料，退回嘗試在線擷取
+    if not source_data:
+        try:
+            url = "https://tw-aed.mohw.gov.tw/openData?t=json"
+            response = requests.get(url, headers=REQUEST_HEADERS, timeout=5, verify=False)
+            if response.status_code == 200:
+                source_data = response.json()
+        except Exception as e:
+            print(f"線上 API 請求失敗: {e}")
+
+    for item in source_data:
+        if not isinstance(item, dict):
+            continue
+            
+        try:
+            raw_lat = item.get("地點LAT") or item.get("latitude") or 0.0
+            raw_lng = item.get("地點LNG") or item.get("longitude") or 0.0
+            lat, lng = float(raw_lat), float(raw_lng)
+        except (ValueError, TypeError):
+            continue
+            
+        if lat == 0.0 or lng == 0.0:
+            continue
+            
+        dist = calculate_distance(user_latitude, user_longitude, lat, lng)
+        
+        place_name = str(item.get("場所名稱") or "AED 急救站").strip()
+        location_detail = str(item.get("AED放置地點") or item.get("AED地點描述") or "詳見現場標示").strip()
+        
+        aed_results.append({
+            "name": place_name,
+            "type": "🆘 AED",
+            "latitude": lat,
+            "longitude": lng,
+            "distance": round(dist),
+            "extra_info": f"位置: {location_detail}"
+        })
+
+    # 全局精確距離排序，確保傳回數值絕對最小（最近）的項目
+    aed_results.sort(key=lambda x: x["distance"])
+    
+    # 嚴格傳回距離最近的前 5 筆
+    return aed_results[:5]
 
 
 def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
@@ -102,14 +143,16 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
                 })
     except Exception as e:
         print(f"YouBike API 讀取異常: {e}")
-    return youbike_results
+        
+    youbike_results.sort(key=lambda x: x["distance"])
+    return youbike_results[:5]
 
 
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
     toilet_results = []
     try:
         url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=5000"
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=3, verify=False)
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=5, verify=False)
         data = response.json().get("result", {}).get("results", [])
         
         for t in data:
@@ -123,73 +166,10 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
                     "extra_info": f"環境評等: {t.get('等級') or '良好'}"
                 })
     except Exception as e:
-        print(f"公廁網路 API 受阻，啟動全區動態資料庫比對: {e}")
-
-    # 若網路 API 遭受海外 IP 防火牆阻擋，自動依傳送座標計算距離並由近至遠排序
-    if not toilet_results:
-        for t in FULL_PUBLIC_TOILETS:
-            dist = calculate_distance(user_latitude, user_longitude, t["latitude"], t["longitude"])
-            toilet_results.append({
-                "name": t["name"], "type": "🚻 公廁",
-                "latitude": t["latitude"], "longitude": t["longitude"], "distance": round(dist),
-                "extra_info": t["extra"]
-            })
-            
-    return toilet_results
-
-
-def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
-    aed_results = []
-    try:
-        # 升級：直接串接衛福部「全台 AED」即時 API (JSON 格式)
-        url = "https://tw-aed.mohw.gov.tw/openData?t=json"
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=8, verify=False)
-        response.raise_for_status()
+        print(f"公廁 API 讀取異常: {e}")
         
-        # 衛福部回傳的直接是資料清單
-        data = response.json()
-        
-        for a in data:
-            if not isinstance(a, dict): continue
-            
-            # 衛福部資料的欄位名稱叫做「地點LAT」與「地點LNG」
-            raw_lat = a.get("地點LAT") or 0.0
-            raw_lng = a.get("地點LNG") or 0.0
-            
-            try:
-                lat, lng = float(raw_lat), float(raw_lng)
-            except ValueError:
-                continue
-                
-            if lat == 0.0 or lng == 0.0: continue
-            
-            dist = calculate_distance(user_latitude, user_longitude, lat, lng)
-            
-            # 尋找方圓 3 公里內的 AED
-            if dist <= 3000.0:
-                aed_results.append({
-                    "name": str(a.get("場所名稱") or "AED 急救站"), 
-                    "type": "🆘 AED",
-                    "latitude": lat, 
-                    "longitude": lng, 
-                    "distance": round(dist),
-                    "extra_info": f"位置: {a.get('AED放置地點') or '詳見現場標示'}"
-                })
-    except Exception as e:
-        print(f"全台 AED 網路 API 受阻: {e}")
-
-    # 若發生例外阻擋，維持原有的緊急備援清單
-    if not aed_results:
-        for a in FULL_AED_STATIONS:
-            dist = calculate_distance(user_latitude, user_longitude, a["latitude"], a["longitude"])
-            if dist <= 3000.0:
-                aed_results.append({
-                    "name": a["name"], "type": "🆘 AED",
-                    "latitude": a["latitude"], "longitude": a["longitude"], "distance": round(dist),
-                    "extra_info": a["extra"]
-                })
-            
-    return aed_results
+    toilet_results.sort(key=lambda x: x["distance"])
+    return toilet_results[:5]
 
 
 @app.route("/liff/map", methods=['GET'])
@@ -252,10 +232,6 @@ def handle_location_message(event):
     else:
         search_results = []
 
-    # 核心演算：依據與傳送點的直線距離由近至遠排序，取前 10 筆
-    search_results.sort(key=lambda item: item["distance"])
-    search_results = search_results[:10]
-    
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         
