@@ -4,7 +4,6 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>地點地圖預覽</title>
-    <!-- 引入免費開源地圖 Leaflet.js CSS 與 JS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
@@ -16,22 +15,30 @@
     <div id="map"></div>
 
     <script>
-        // 解析 URL 傳入的經緯度與名稱參數 (?lat=...&lng=...&name=...)
-        const urlParameters = new URLSearchParams(window.location.search);
-        const destinationLatitude = parseFloat(urlParameters.get('lat')) || 25.033968;
-        const destinationLongitude = parseFloat(urlParameters.get('lng')) || 121.564472;
-        const destinationName = urlParameters.get('name') || '目標地點';
+        // 解析網址參數（同時支援一般網址與 LINE LIFF 的 liff.state 格式）
+        let urlParams = new URLSearchParams(window.location.search);
+        
+        if (urlParams.has('liff.state')) {
+            const liffState = urlParams.get('liff.state');
+            // 解碼 liff.state 內包裝的參數
+            urlParams = new URLSearchParams(liffState.startsWith('?') ? liffState : '?' + liffState);
+        }
 
-        // 初始化地圖，設定中心點與縮放層級
-        const leafletMap = L.map('map').setView([destinationLatitude, destinationLongitude], 16);
+        const rawLat = urlParams.get('lat');
+        const rawLng = urlParams.get('lng');
+        const rawName = urlParams.get('name');
 
-        // 載入 OpenStreetMap 圖資
+        const destinationLatitude = rawLat ? parseFloat(rawLat) : 25.033968;
+        const destinationLongitude = rawLng ? parseFloat(rawLng) : 121.564472;
+        const destinationName = rawName ? decodeURIComponent(rawName) : '目標地點';
+
+        const leafletMap = L.map('map').setView([destinationLatitude, destinationLongitude], 17);
+
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '© OpenStreetMap'
         }).addTo(leafletMap);
 
-        // 建立地標大頭針並彈出標籤
         L.marker([destinationLatitude, destinationLongitude]).addTo(leafletMap)
             .bindPopup(`<b>${destinationName}</b>`)
             .openPopup();
