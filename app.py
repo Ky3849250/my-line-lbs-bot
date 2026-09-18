@@ -35,7 +35,7 @@ REQUEST_HEADERS = {
 }
 
 # ==========================================
-# 核心載入：啟動時將 AED 與公廁資料載入記憶體
+# 本地資料庫載入（AED + 公廁多來源整合庫）
 # ==========================================
 LOCAL_AED_DATABASE = []
 LOCAL_TOILET_DATABASE = []
@@ -44,21 +44,19 @@ BASE_DIR = os.path.dirname(__file__)
 AED_JSON_PATH = os.path.join(BASE_DIR, "aed.json")
 TOILET_JSON_PATH = os.path.join(BASE_DIR, "toilet.json")
 
-# 1. 載入 AED 全量資料
 if os.path.exists(AED_JSON_PATH):
     try:
         with open(AED_JSON_PATH, "r", encoding="utf-8") as f:
             LOCAL_AED_DATABASE = json.load(f)
-            print(f"【成功載入】全台 AED 資料庫共 {len(LOCAL_AED_DATABASE)} 筆紀錄。")
+            print(f"【成功載入】AED 資料庫共 {len(LOCAL_AED_DATABASE)} 筆紀錄。")
     except Exception as e:
         print(f"【載入失敗】aed.json 讀取異常: {e}")
 
-# 2. 載入公廁全量資料
 if os.path.exists(TOILET_JSON_PATH):
     try:
         with open(TOILET_JSON_PATH, "r", encoding="utf-8") as f:
             LOCAL_TOILET_DATABASE = json.load(f)
-            print(f"【成功載入】全台公廁資料庫共 {len(LOCAL_TOILET_DATABASE)} 筆紀錄。")
+            print(f"【成功載入】全台與特定場域公廁資料庫共 {len(LOCAL_TOILET_DATABASE)} 筆紀錄。")
     except Exception as e:
         print(f"【載入失敗】toilet.json 讀取異常: {e}")
 
@@ -79,24 +77,14 @@ def calculate_distance(origin_latitude: float, origin_longitude: float,
 
 
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
-    """ AED 全局精確距離比對 (回傳最近 5 筆) """
     aed_results = []
     source_data = LOCAL_AED_DATABASE
     
-    if not source_data:
-        try:
-            url = "https://tw-aed.mohw.gov.tw/openData?t=json"
-            response = requests.get(url, headers=REQUEST_HEADERS, timeout=5, verify=False)
-            if response.status_code == 200:
-                source_data = response.json()
-        except Exception as e:
-            print(f"線上 AED API 請求失敗: {e}")
-
     for item in source_data:
         if not isinstance(item, dict): continue
         try:
-            raw_lat = item.get("地點LAT") or item.get("latitude") or 0.0
-            raw_lng = item.get("地點LNG") or item.get("longitude") or 0.0
+            raw_lat = item.get("地點LAT") or item.get("latitude") or item.get("lat") or 0.0
+            raw_lng = item.get("地點LNG") or item.get("longitude") or item.get("lng") or 0.0
             lat, lng = float(raw_lat), float(raw_lng)
         except (ValueError, TypeError):
             continue
@@ -121,25 +109,19 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
 
 
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
-    """ 公廁全局精確比對：呈現廁所型態、評等與尿布台設施 """
+    """ 多來源公廁通用比對：支援全台、夜市友善、河濱公園及無障礙/性別友善特定點位 """
     toilet_results = []
     source_data = LOCAL_TOILET_DATABASE
-    
-    if not source_data:
-        try:
-            url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=5000"
-            response = requests.get(url, headers=REQUEST_HEADERS, timeout=5, verify=False)
-            if response.status_code == 200:
-                source_data = response.json().get("result", {}).get("results", [])
-        except Exception as e:
-            print(f"公廁 API 讀取異常: {e}")
 
     for item in source_data:
         if not isinstance(item, dict): continue
         
+        # 1. 座標相容解析 (支援各縣市不同欄位命名: 緯度/latitude/lat/y, 經度/longitude/lng/x)
         try:
-            raw_lat = item.get("緯度") or item.get("latitude") or item.get("Latitude") or 0.0
-            raw_lng = item.get("經度") or item.get("longitude") or item.get("Longitude") or 0.0
+            raw_lat = (item.get("latitude") or item.get("緯度") or item.get("Latitude") or 
+                       item.get("lat") or item.get("Py") or item.get("Y") or 0.0)
+            raw_lng = (item.get("longitude") or item.get("經度") or item.get("Longitude") or 
+                       item.get("lng") or item.get("Px") or item.get("X") or 0.0)
             lat, lng = float(raw_lat), float(raw_lng)
         except (ValueError, TypeError):
             continue
@@ -148,39 +130,51 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
             
         dist = calculate_distance(user_latitude, user_longitude, lat, lng)
         
-        # 1. 廁所型態 (type)
-        toilet_type = str(item.get("type") or item.get("型態") or "").strip()
+        # 2. 公廁名稱解析
+        place_name = str(item.get("name") or item.get("公廁名稱") or item.get("標題") or 
+                         item.get("單位名稱") or item.get("名稱") or "公共廁所").strip()
         
-        # 2. 環境評等 (grade)
-        grade = str(item.get("grade") or item.get("等級") or "良好").strip()
+        # 3. 廁所型態與特徵判斷 (自動偵測夜市友善、無障礙、性別友善、親子等)
+        toilet_type = str(item.get("type") or item.get("廁所型態") or item.get("型態") or "").strip()
+        item_text = str(item)
         
-        # 3. 尿布台數量 (diaper)
+        tags = []
+        if toilet_type:
+            tags.append(toilet_type)
+        if "夜市" in item_text or "友善店家" in item_text:
+            tags.append("🌙夜市友善")
+        if "無障礙" in item_text or "身障" in item_text:
+            tags.append("♿無障礙")
+        if "性別友善" in item_text or "通用" in item_text:
+            tags.append("🌈性別友善")
+            
+        tag_str = " | ".join(dict.fromkeys(tags)) if tags else "一般公廁"
+        
+        # 4. 評等與尿布台判定
+        grade = str(item.get("grade") or item.get("等級") or "優良").strip()
+        
         try:
             diaper_count = int(item.get("diaper") or item.get("尿布台") or 0)
         except (ValueError, TypeError):
-            diaper_count = 0
+            diaper_count = 1 if "尿布台" in item_text or "親子" in item_text else 0
             
         diaper_info = f"👶 尿布台：有 ({diaper_count}台)" if diaper_count > 0 else "👶 尿布台：無"
-        type_info = f" | 🏷️ {toilet_type}" if toilet_type else ""
 
-        place_name = str(item.get("name") or item.get("公廁名稱") or "公共廁所").strip()
-        
         toilet_results.append({
             "name": place_name, 
-            "type": f"🚻 公廁{type_info}",
+            "type": f"🚻 公廁 ({tag_str})",
             "latitude": lat, 
             "longitude": lng, 
             "distance": round(dist),
             "extra_info": f"⭐ 評等：{grade}\n{diaper_info}"
         })
 
-    # 按直線距離由近至遠排序，取最近的前 5 筆
+    # 按直線距離排序，精確傳回最近 5 筆
     toilet_results.sort(key=lambda x: x["distance"])
     return toilet_results[:5]
 
 
 def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
-    """ YouBike 維持即時 API 連線取得最新剩餘車位 """
     youbike_results = []
     try:
         url = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
