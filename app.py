@@ -2,6 +2,7 @@ import os
 import math
 import requests
 import urllib3
+import urllib.parse  # 新增：用來將中文字轉換為網址安全編碼
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
 
@@ -22,7 +23,6 @@ app = Flask(__name__)
 
 channel_secret = os.getenv('LINE_CHANNEL_SECRET')
 channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-# 自動去除前後可能多複製到的空白格
 liff_id = (os.getenv('LINE_LIFF_ID') or '').strip()
 
 handler = WebhookHandler(channel_secret)
@@ -30,8 +30,12 @@ configuration = Configuration(access_token=channel_access_token)
 
 user_search_state = {}
 
+# 偽裝成一般瀏覽器，避免被政府網站的防機器人機制阻擋
+REQUEST_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
+
 def safe_parse_json_list(raw_json_data) -> list:
-    """ 通用容錯解析器：無論 API 回傳 List 或 Dict，皆能安全取出資料清單 """
     if isinstance(raw_json_data, list):
         return raw_json_data
     elif isinstance(raw_json_data, dict):
@@ -53,7 +57,6 @@ def calculate_distance(origin_latitude: float, origin_longitude: float,
     phi_destination = math.radians(destination_latitude)
     delta_phi = math.radians(destination_latitude - origin_latitude)
     delta_lambda = math.radians(destination_longitude - origin_longitude)
-
     haversine_a = (math.sin(delta_phi / 2.0) ** 2 + 
                    math.cos(phi_origin) * math.cos(phi_destination) * math.sin(delta_lambda / 2.0) ** 2)
     haversine_c = 2.0 * math.atan2(math.sqrt(haversine_a), math.sqrt(1.0 - haversine_a))
@@ -64,35 +67,30 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
     youbike_results = []
     try:
         youbike_api_url = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
-        response = requests.get(youbike_api_url, timeout=5, verify=False)
+        response = requests.get(youbike_api_url, headers=REQUEST_HEADERS, timeout=5, verify=False)
         response.raise_for_status()
-        
         youbike_data_list = safe_parse_json_list(response.json())
         
         for station in youbike_data_list:
-            if not isinstance(station, dict):
-                continue
-            raw_latitude = station.get("latitude") or station.get("lat") or 0.0
-            raw_longitude = station.get("longitude") or station.get("lng") or 0.0
-            station_latitude, station_longitude = float(raw_latitude), float(raw_longitude)
+            if not isinstance(station, dict): continue
+            raw_lat = station.get("latitude") or station.get("lat") or 0.0
+            raw_lng = station.get("longitude") or station.get("lng") or 0.0
+            st_lat, st_lng = float(raw_lat), float(raw_lng)
             
-            if station_latitude == 0.0 or station_longitude == 0.0:
-                continue
+            if st_lat == 0.0 or st_lng == 0.0: continue
             
-            distance_meters = calculate_distance(user_latitude, user_longitude, station_latitude, station_longitude)
+            distance_meters = calculate_distance(user_latitude, user_longitude, st_lat, st_lng)
             if distance_meters <= 3000.0:
-                formatted_station_name = str(station.get("sna", "YouBike 站點")).replace("YouBike2.0_", "")
-                available_bikes = int(station.get("available_rent_bikes") or station.get("sbi") or 0)
-                empty_spaces = int(station.get("available_return_bikes") or station.get("bemp") or 0)
-                
+                formatted_name = str(station.get("sna", "YouBike")).replace("YouBike2.0_", "")
+                av_bikes = int(station.get("available_rent_bikes") or station.get("sbi") or 0)
+                em_spaces = int(station.get("available_return_bikes") or station.get("bemp") or 0)
                 youbike_results.append({
-                    "name": formatted_station_name, "type": "🚲 YouBike",
-                    "latitude": station_latitude, "longitude": station_longitude,
-                    "distance": round(distance_meters),
-                    "extra_info": f"可借: {available_bikes} 輛 | 可還: {empty_spaces} 格"
+                    "name": formatted_name, "type": "🚲 YouBike",
+                    "latitude": st_lat, "longitude": st_lng, "distance": round(distance_meters),
+                    "extra_info": f"可借: {av_bikes} 輛 | 可還: {em_spaces} 格"
                 })
-    except Exception as error_exception:
-        print(f"YouBike API 讀取異常: {error_exception}")
+    except Exception as e:
+        print(f"YouBike API 讀取異常: {e}")
     return youbike_results
 
 
@@ -100,31 +98,27 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
     toilet_results = []
     try:
         public_toilet_api_url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=10000"
-        response = requests.get(public_toilet_api_url, timeout=5, verify=False)
+        response = requests.get(public_toilet_api_url, headers=REQUEST_HEADERS, timeout=10, verify=False)
         response.raise_for_status()
-        
         toilet_data_list = safe_parse_json_list(response.json())
         
         for toilet in toilet_data_list:
-            if not isinstance(toilet, dict):
-                continue
-            raw_latitude = toilet.get("緯度") or toilet.get("latitude") or 0.0
-            raw_longitude = toilet.get("經度") or toilet.get("longitude") or 0.0
-            toilet_latitude, toilet_longitude = float(raw_latitude), float(raw_longitude)
+            if not isinstance(toilet, dict): continue
+            raw_lat = toilet.get("緯度") or toilet.get("latitude") or 0.0
+            raw_lng = toilet.get("經度") or toilet.get("longitude") or 0.0
+            t_lat, t_lng = float(raw_lat), float(raw_lng)
             
-            if toilet_latitude == 0.0 or toilet_longitude == 0.0:
-                continue
+            if t_lat == 0.0 or t_lng == 0.0: continue
                 
-            distance_meters = calculate_distance(user_latitude, user_longitude, toilet_latitude, toilet_longitude)
+            distance_meters = calculate_distance(user_latitude, user_longitude, t_lat, t_lng)
             if distance_meters <= 3000.0:
                 toilet_results.append({
                     "name": str(toilet.get("公廁名稱") or "公共廁所"), "type": "🚻 公廁",
-                    "latitude": toilet_latitude, "longitude": toilet_longitude,
-                    "distance": round(distance_meters),
-                    "extra_info": f"環境評等: {toilet.get('等級') or '優良'}"
+                    "latitude": t_lat, "longitude": t_lng, "distance": round(distance_meters),
+                    "extra_info": f"環境評等: {toilet.get('等級') or '未知'}"
                 })
-    except Exception as error_exception:
-        print(f"公廁 API 讀取異常: {error_exception}")
+    except Exception as e:
+        print(f"公廁 API 讀取異常: {e}")
     return toilet_results
 
 
@@ -132,31 +126,27 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
     aed_results = []
     try:
         aed_api_url = "https://data.taipei/api/v1/dataset/cd050577-115f-4299-b37a-012ff490a632?scope=resourceAquire&limit=10000"
-        response = requests.get(aed_api_url, timeout=5, verify=False)
+        response = requests.get(aed_api_url, headers=REQUEST_HEADERS, timeout=10, verify=False)
         response.raise_for_status()
-        
         aed_data_list = safe_parse_json_list(response.json())
         
         for aed in aed_data_list:
-            if not isinstance(aed, dict):
-                continue
-            raw_latitude = aed.get("緯度") or aed.get("latitude") or 0.0
-            raw_longitude = aed.get("經度") or aed.get("longitude") or 0.0
-            aed_latitude, aed_longitude = float(raw_latitude), float(raw_longitude)
+            if not isinstance(aed, dict): continue
+            raw_lat = aed.get("緯度") or aed.get("latitude") or 0.0
+            raw_lng = aed.get("經度") or aed.get("longitude") or 0.0
+            a_lat, a_lng = float(raw_lat), float(raw_lng)
             
-            if aed_latitude == 0.0 or aed_longitude == 0.0:
-                continue
+            if a_lat == 0.0 or a_lng == 0.0: continue
                 
-            distance_meters = calculate_distance(user_latitude, user_longitude, aed_latitude, aed_longitude)
+            distance_meters = calculate_distance(user_latitude, user_longitude, a_lat, a_lng)
             if distance_meters <= 3000.0:
                 aed_results.append({
                     "name": str(aed.get("場所名稱") or "AED 急救站"), "type": "🆘 AED",
-                    "latitude": aed_latitude, "longitude": aed_longitude,
-                    "distance": round(distance_meters),
+                    "latitude": a_lat, "longitude": a_lng, "distance": round(distance_meters),
                     "extra_info": f"位置: {aed.get('AED放置地點') or '詳見現場標示'}"
                 })
-    except Exception as error_exception:
-        print(f"AED API 讀取異常: {error_exception}")
+    except Exception as e:
+        print(f"AED API 讀取異常: {e}")
     return aed_results
 
 
@@ -234,12 +224,13 @@ def handle_location_message(event):
             for item in search_results:
                 google_navigation_url = f"https://www.google.com/maps/dir/?api=1&destination={item['latitude']},{item['longitude']}"
                 
-                # 判斷是否成功讀取 LINE_LIFF_ID
+                # 【關鍵修復】使用 urllib.parse.quote 將中文字進行 URL 安全編碼
+                safe_name = urllib.parse.quote(item['name'])
+                
                 if liff_id:
-                    liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={item['name']}"
+                    liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
                 else:
-                    print("【系統警告】未檢測到 LINE_LIFF_ID 環境變數，回退至普通網頁模式！")
-                    liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={item['name']}"
+                    liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
 
                 body_contents = [
                     {"type": "text", "text": item["type"], "weight": "bold", "size": "xs", "color": "#00B900"},
