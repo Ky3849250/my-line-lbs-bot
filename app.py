@@ -4,7 +4,6 @@ import json
 import requests
 import urllib3
 import urllib.parse
-from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
 
@@ -79,38 +78,6 @@ def calculate_distance(origin_latitude: float, origin_longitude: float,
     return earth_radius_meters * haversine_c
 
 
-def parse_opening_status(open_time_str: str) -> tuple:
-    """
-    解析開放時間字串，自動比對台灣當下時間 (UTC+8)
-    傳回: (is_open_now: bool, status_text: str)
-    """
-    if not open_time_str or any(k in open_time_str for k in ["24", "全天", "全年", "無限制", "隨時"]):
-        return True, "🟢 24小時開放"
-    
-    try:
-        clean_time = open_time_str.replace("~", "-").replace("：", ":").strip()
-        if "-" in clean_time:
-            time_parts = clean_time.split("-")
-            start_str = time_parts[0].strip()
-            end_str = time_parts[1].strip()
-            
-            # 使用內建標準庫取得台灣當前時間 (UTC+8)
-            taiwan_tz = timezone(timedelta(hours=8))
-            current_time = datetime.now(taiwan_tz).time()
-            
-            start_time = datetime.strptime(start_str, "%H:%M").time()
-            end_time = datetime.strptime(end_str, "%H:%M").time()
-            
-            if start_time <= current_time <= end_time:
-                return True, f"🟢 開放中 ({start_str}-{end_str})"
-            else:
-                return False, f"🔴 已休息 ({start_str}-{end_str})"
-    except Exception:
-        pass
-        
-    return True, f"🕒 開放時間: {open_time_str}"
-
-
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
     """ AED 全局精確距離比對 (回傳最近 5 筆) """
     aed_results = []
@@ -154,7 +121,7 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
 
 
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
-    """ 公廁全局精確比對：結合時間判斷與設施特徵解析 """
+    """ 公廁全局精確比對：呈現廁所型態、評等與尿布台設施 """
     toilet_results = []
     source_data = LOCAL_TOILET_DATABASE
     
@@ -181,36 +148,34 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
             
         dist = calculate_distance(user_latitude, user_longitude, lat, lng)
         
-        # 1. 營業時間與狀態判斷
-        open_time_raw = str(item.get("開放時間") or item.get("open_time") or "").strip()
-        is_open_now, status_text = parse_opening_status(open_time_raw)
-
-        # 2. 設施特徵標籤解析
-        facility_tags = []
-        item_str = str(item)
+        # 1. 廁所型態 (type)
+        toilet_type = str(item.get("type") or item.get("型態") or "").strip()
         
-        if any(k in item_str for k in ["無障礙", "身障", "殘障"]) and "無" not in str(item.get("無障礙廁所", "")):
-            facility_tags.append("♿無障礙")
-        if any(k in item_str for k in ["尿布台", "親子", "育嬰"]):
-            facility_tags.append("👶尿布台")
-        if any(k in item_str for k in ["性別友善", "通用廁所", "無性別", "男女共用"]):
-            facility_tags.append("🌈性別友善")
+        # 2. 環境評等 (grade)
+        grade = str(item.get("grade") or item.get("等級") or "良好").strip()
+        
+        # 3. 尿布台數量 (diaper)
+        try:
+            diaper_count = int(item.get("diaper") or item.get("尿布台") or 0)
+        except (ValueError, TypeError):
+            diaper_count = 0
+            
+        diaper_info = f"👶 尿布台：有 ({diaper_count}台)" if diaper_count > 0 else "👶 尿布台：無"
+        type_info = f" | 🏷️ {toilet_type}" if toilet_type else ""
 
-        tag_display_text = " | ".join(facility_tags) if facility_tags else "🔹 一般公共廁所"
-        place_name = str(item.get("公廁名稱") or item.get("name") or "公共廁所").strip()
+        place_name = str(item.get("name") or item.get("公廁名稱") or "公共廁所").strip()
         
         toilet_results.append({
             "name": place_name, 
-            "type": "🚻 公廁",
+            "type": f"🚻 公廁{type_info}",
             "latitude": lat, 
             "longitude": lng, 
             "distance": round(dist),
-            "extra_info": f"{status_text}\n✨ 設施: {tag_display_text}",
-            "is_open": is_open_now
+            "extra_info": f"⭐ 評等：{grade}\n{diaper_info}"
         })
 
-    # 排序規則：優先顯示「開放中」的公廁，同狀態下按距離由近至遠排序
-    toilet_results.sort(key=lambda x: (not x["is_open"], x["distance"]))
+    # 按直線距離由近至遠排序，取最近的前 5 筆
+    toilet_results.sort(key=lambda x: x["distance"])
     return toilet_results[:5]
 
 
