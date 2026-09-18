@@ -9,28 +9,25 @@
     <style>
         body, html { margin: 0; padding: 0; height: 100%; width: 100%; font-family: sans-serif; }
         #map { width: 100%; height: 100%; }
+        .popup-card { padding: 4px; line-height: 1.5; }
+        .popup-title { font-size: 15px; font-weight: bold; color: #1DB446; margin-bottom: 4px; }
+        .popup-tag { display: inline-block; background: #e8f5e9; color: #2e7d32; padding: 2px 6px; border-radius: 4px; font-size: 12px; margin-top: 4px; }
     </style>
 </head>
 <body>
     <div id="map"></div>
 
     <script>
-        // 解析網址參數（同時支援一般網址與 LINE LIFF 的 liff.state 格式）
         let urlParams = new URLSearchParams(window.location.search);
         
         if (urlParams.has('liff.state')) {
             const liffState = urlParams.get('liff.state');
-            // 解碼 liff.state 內包裝的參數
             urlParams = new URLSearchParams(liffState.startsWith('?') ? liffState : '?' + liffState);
         }
 
-        const rawLat = urlParams.get('lat');
-        const rawLng = urlParams.get('lng');
-        const rawName = urlParams.get('name');
-
-        const destinationLatitude = rawLat ? parseFloat(rawLat) : 25.033968;
-        const destinationLongitude = rawLng ? parseFloat(rawLng) : 121.564472;
-        const destinationName = rawName ? decodeURIComponent(rawName) : '目標地點';
+        const destinationLatitude = parseFloat(urlParams.get('lat')) || 25.033968;
+        const destinationLongitude = parseFloat(urlParams.get('lng')) || 121.564472;
+        const destinationName = decodeURIComponent(urlParams.get('name') || '目標地點');
 
         const leafletMap = L.map('map').setView([destinationLatitude, destinationLongitude], 17);
 
@@ -39,8 +36,17 @@
             attribution: '© OpenStreetMap'
         }).addTo(leafletMap);
 
+        // 建立豐富的資訊彈窗
+        const popupContent = `
+            <div class="popup-card">
+                <div class="popup-title">${destinationName}</div>
+                <div>📍 經緯度：${destinationLatitude.toFixed(4)}, ${destinationLongitude.toFixed(4)}</div>
+                <div class="popup-tag">導航準備就緒</div>
+            </div>
+        `;
+
         L.marker([destinationLatitude, destinationLongitude]).addTo(leafletMap)
-            .bindPopup(`<b>${destinationName}</b>`)
+            .bindPopup(popupContent)
             .openPopup();
     </script>
 </body>

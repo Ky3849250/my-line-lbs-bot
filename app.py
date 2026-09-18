@@ -4,6 +4,7 @@ import json
 import requests
 import urllib3
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
 
@@ -35,7 +36,7 @@ REQUEST_HEADERS = {
 }
 
 # ==========================================
-# 核心升級：啟動時載入 AED 與公廁的全量本地資料庫
+# 核心載入：啟動時將 AED 與公廁資料載入記憶體
 # ==========================================
 LOCAL_AED_DATABASE = []
 LOCAL_TOILET_DATABASE = []
@@ -44,7 +45,7 @@ BASE_DIR = os.path.dirname(__file__)
 AED_JSON_PATH = os.path.join(BASE_DIR, "aed.json")
 TOILET_JSON_PATH = os.path.join(BASE_DIR, "toilet.json")
 
-# 1. 載入 AED 資料
+# 1. 載入 AED 全量資料
 if os.path.exists(AED_JSON_PATH):
     try:
         with open(AED_JSON_PATH, "r", encoding="utf-8") as f:
@@ -53,7 +54,7 @@ if os.path.exists(AED_JSON_PATH):
     except Exception as e:
         print(f"【載入失敗】aed.json 讀取異常: {e}")
 
-# 2. 載入公廁資料
+# 2. 載入公廁全量資料
 if os.path.exists(TOILET_JSON_PATH):
     try:
         with open(TOILET_JSON_PATH, "r", encoding="utf-8") as f:
@@ -78,7 +79,40 @@ def calculate_distance(origin_latitude: float, origin_longitude: float,
     return earth_radius_meters * haversine_c
 
 
+def parse_opening_status(open_time_str: str) -> tuple:
+    """
+    解析開放時間字串，自動比對台灣當下時間 (UTC+8)
+    傳回: (is_open_now: bool, status_text: str)
+    """
+    if not open_time_str or any(k in open_time_str for k in ["24", "全天", "全年", "無限制", "隨時"]):
+        return True, "🟢 24小時開放"
+    
+    try:
+        clean_time = open_time_str.replace("~", "-").replace("：", ":").strip()
+        if "-" in clean_time:
+            time_parts = clean_time.split("-")
+            start_str = time_parts[0].strip()
+            end_str = time_parts[1].strip()
+            
+            # 使用內建標準庫取得台灣當前時間 (UTC+8)
+            taiwan_tz = timezone(timedelta(hours=8))
+            current_time = datetime.now(taiwan_tz).time()
+            
+            start_time = datetime.strptime(start_str, "%H:%M").time()
+            end_time = datetime.strptime(end_str, "%H:%M").time()
+            
+            if start_time <= current_time <= end_time:
+                return True, f"🟢 開放中 ({start_str}-{end_str})"
+            else:
+                return False, f"🔴 已休息 ({start_str}-{end_str})"
+    except Exception:
+        pass
+        
+    return True, f"🕒 開放時間: {open_time_str}"
+
+
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
+    """ AED 全局精確距離比對 (回傳最近 5 筆) """
     aed_results = []
     source_data = LOCAL_AED_DATABASE
     
@@ -107,8 +141,11 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
         location_detail = str(item.get("AED放置地點") or item.get("AED地點描述") or "詳見現場標示").strip()
         
         aed_results.append({
-            "name": place_name, "type": "🆘 AED",
-            "latitude": lat, "longitude": lng, "distance": round(dist),
+            "name": place_name, 
+            "type": "🆘 AED",
+            "latitude": lat, 
+            "longitude": lng, 
+            "distance": round(dist),
             "extra_info": f"位置: {location_detail}"
         })
 
@@ -117,13 +154,12 @@ def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
 
 
 def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> list:
-    """ 全局精確比對：從本地 toilet.json 中運算並篩選最近的公廁 """
+    """ 公廁全局精確比對：結合時間判斷與設施特徵解析 """
     toilet_results = []
     source_data = LOCAL_TOILET_DATABASE
     
     if not source_data:
         try:
-            # 備用：若無本地檔案，嘗試抓取台北市開放資料
             url = "https://data.taipei/api/v1/dataset/ca205b54-a06f-4d84-894c-d6ab5079ce79?scope=resourceAquire&limit=5000"
             response = requests.get(url, headers=REQUEST_HEADERS, timeout=5, verify=False)
             if response.status_code == 200:
@@ -134,7 +170,6 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
     for item in source_data:
         if not isinstance(item, dict): continue
         
-        # 兼容不同政府平台的欄位名稱 (緯度/latitude, 經度/longitude)
         try:
             raw_lat = item.get("緯度") or item.get("latitude") or item.get("Latitude") or 0.0
             raw_lng = item.get("經度") or item.get("longitude") or item.get("Longitude") or 0.0
@@ -146,22 +181,41 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
             
         dist = calculate_distance(user_latitude, user_longitude, lat, lng)
         
+        # 1. 營業時間與狀態判斷
+        open_time_raw = str(item.get("開放時間") or item.get("open_time") or "").strip()
+        is_open_now, status_text = parse_opening_status(open_time_raw)
+
+        # 2. 設施特徵標籤解析
+        facility_tags = []
+        item_str = str(item)
+        
+        if any(k in item_str for k in ["無障礙", "身障", "殘障"]) and "無" not in str(item.get("無障礙廁所", "")):
+            facility_tags.append("♿無障礙")
+        if any(k in item_str for k in ["尿布台", "親子", "育嬰"]):
+            facility_tags.append("👶尿布台")
+        if any(k in item_str for k in ["性別友善", "通用廁所", "無性別", "男女共用"]):
+            facility_tags.append("🌈性別友善")
+
+        tag_display_text = " | ".join(facility_tags) if facility_tags else "🔹 一般公共廁所"
         place_name = str(item.get("公廁名稱") or item.get("name") or "公共廁所").strip()
-        grade = str(item.get("等級") or item.get("grade") or "良好").strip()
         
         toilet_results.append({
-            "name": place_name, "type": "🚻 公廁",
-            "latitude": lat, "longitude": lng, "distance": round(dist),
-            "extra_info": f"環境評等: {grade}"
+            "name": place_name, 
+            "type": "🚻 公廁",
+            "latitude": lat, 
+            "longitude": lng, 
+            "distance": round(dist),
+            "extra_info": f"{status_text}\n✨ 設施: {tag_display_text}",
+            "is_open": is_open_now
         })
 
-    # 全局排序，嚴格傳回距離最近的前 5 筆
-    toilet_results.sort(key=lambda x: x["distance"])
+    # 排序規則：優先顯示「開放中」的公廁，同狀態下按距離由近至遠排序
+    toilet_results.sort(key=lambda x: (not x["is_open"], x["distance"]))
     return toilet_results[:5]
 
 
 def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
-    """ YouBike 維持即時連線，確保取得「當下剩餘車位數」 """
+    """ YouBike 維持即時 API 連線取得最新剩餘車位 """
     youbike_results = []
     try:
         url = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
