@@ -141,31 +141,53 @@ def fetch_public_toilet_data(user_latitude: float, user_longitude: float) -> lis
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
     aed_results = []
     try:
-        url = "https://data.taipei/api/v1/dataset/cd050577-115f-4299-b37a-012ff490a632?scope=resourceAquire&limit=5000"
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=3, verify=False)
-        data = response.json().get("result", {}).get("results", [])
+        # 升級：直接串接衛福部「全台 AED」即時 API (JSON 格式)
+        url = "https://tw-aed.mohw.gov.tw/openData?t=json"
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=8, verify=False)
+        response.raise_for_status()
+        
+        # 衛福部回傳的直接是資料清單
+        data = response.json()
         
         for a in data:
-            lat, lng = float(a.get("緯度") or 0), float(a.get("經度") or 0)
-            if lat == 0 or lng == 0: continue
+            if not isinstance(a, dict): continue
+            
+            # 衛福部資料的欄位名稱叫做「地點LAT」與「地點LNG」
+            raw_lat = a.get("地點LAT") or 0.0
+            raw_lng = a.get("地點LNG") or 0.0
+            
+            try:
+                lat, lng = float(raw_lat), float(raw_lng)
+            except ValueError:
+                continue
+                
+            if lat == 0.0 or lng == 0.0: continue
+            
             dist = calculate_distance(user_latitude, user_longitude, lat, lng)
+            
+            # 尋找方圓 3 公里內的 AED
             if dist <= 3000.0:
                 aed_results.append({
-                    "name": str(a.get("場所名稱") or "AED 急救站"), "type": "🆘 AED",
-                    "latitude": lat, "longitude": lng, "distance": round(dist),
+                    "name": str(a.get("場所名稱") or "AED 急救站"), 
+                    "type": "🆘 AED",
+                    "latitude": lat, 
+                    "longitude": lng, 
+                    "distance": round(dist),
                     "extra_info": f"位置: {a.get('AED放置地點') or '詳見現場標示'}"
                 })
     except Exception as e:
-        print(f"AED 網路 API 受阻，啟動全區動態資料庫比對: {e}")
+        print(f"全台 AED 網路 API 受阻: {e}")
 
+    # 若發生例外阻擋，維持原有的緊急備援清單
     if not aed_results:
         for a in FULL_AED_STATIONS:
             dist = calculate_distance(user_latitude, user_longitude, a["latitude"], a["longitude"])
-            aed_results.append({
-                "name": a["name"], "type": "🆘 AED",
-                "latitude": a["latitude"], "longitude": a["longitude"], "distance": round(dist),
-                "extra_info": a["extra"]
-            })
+            if dist <= 3000.0:
+                aed_results.append({
+                    "name": a["name"], "type": "🆘 AED",
+                    "latitude": a["latitude"], "longitude": a["longitude"], "distance": round(dist),
+                    "extra_info": a["extra"]
+                })
             
     return aed_results
 
