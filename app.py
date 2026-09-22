@@ -111,6 +111,7 @@ def get_db_connection():
 # ==========================================
 def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
     if not os.path.exists(BUS_DB_PATH):
+        print("【警告】找不到 bus.db 檔案，無法執行公車查詢！")
         return []
 
     conn = get_db_connection()
@@ -141,7 +142,6 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
 
     raw_list.sort(key=lambda x: x['dist'])
 
-    # 按站牌名稱歸組與路線合併
     grouped_stops = {}
     for item in raw_list:
         stop_name = item['name']
@@ -352,7 +352,6 @@ def handle_text_message(event):
         )
 
 
-@handler.add(LocationMessageContent, message=LocationMessageContent)
 @handler.add(MessageEvent, message=LocationMessageContent)
 def handle_location_message(event):
     user_id = event.source.user_id
@@ -360,135 +359,138 @@ def handle_location_message(event):
     user_longitude = event.message.longitude
     target_type = user_search_state.get(user_id, "🚻 公廁")
     
-    if target_type == "🚲 YouBike": search_results = fetch_youbike_data(user_latitude, user_longitude)
-    elif target_type == "🚻 公廁": search_results = fetch_public_toilet_data(user_latitude, user_longitude)
-    elif target_type == "🆘 AED": search_results = fetch_aed_data(user_latitude, user_longitude)
-    elif target_type == "💧 飲水機": search_results = fetch_water_fountain_data(user_latitude, user_longitude)
-    elif target_type == "🚏 公車站牌": search_results = fetch_bus_data(user_latitude, user_longitude)
-    else: search_results = []
+    try:
+        if target_type == "🚲 YouBike": search_results = fetch_youbike_data(user_latitude, user_longitude)
+        elif target_type == "🚻 公廁": search_results = fetch_public_toilet_data(user_latitude, user_longitude)
+        elif target_type == "🆘 AED": search_results = fetch_aed_data(user_latitude, user_longitude)
+        elif target_type == "💧 飲水機": search_results = fetch_water_fountain_data(user_latitude, user_longitude)
+        elif target_type == "🚏 公車站牌": search_results = fetch_bus_data(user_latitude, user_longitude)
+        else: search_results = []
 
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        if not search_results:
-            line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=f"方圓3公里內找不到【{target_type}】。")])
-            )
-            return
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            if not search_results:
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=f"方圓3公里內找不到【{target_type}】。")])
+                )
+                return
 
-        carousel_contents = {"type": "carousel", "contents": []}
-        
-        for item in search_results:
-            google_navigation_url = f"https://www.google.com/maps/dir/?api=1&destination={item['latitude']},{item['longitude']}"
-            safe_name = urllib.parse.quote(item['name'])
+            carousel_contents = {"type": "carousel", "contents": []}
             
-            if liff_id: liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
-            else: liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
-
-            badge_color = "#00B900"
-            if "飲水機" in target_type: badge_color = "#00BFFF"
-            elif "AED" in target_type: badge_color = "#FF3333"
-            elif "公車" in target_type: badge_color = "#FF9900"
-
-            body_contents = [
-                {"type": "text", "text": item["type"], "weight": "bold", "size": "xs", "color": badge_color},
-                {"type": "text", "text": item["name"], "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
-                {"type": "text", "text": f"📏 距離：約 {item['distance']} 公尺", "size": "xs", "color": "#888888", "margin": "sm"}
-            ]
-
-            if target_type == "🚏 公車站牌":
-                routes_list = item.get('passing_routes', [])
+            for item in search_results:
+                google_navigation_url = f"https://www.google.com/maps/dir/?api=1&destination={item['latitude']},{item['longitude']}"
+                safe_name = urllib.parse.quote(item['name'])
                 
-                # 【核心修改】：將車班資料每 2 個切成一列，強制構建雙欄網格 (2-Column Grid)
-                route_chunks = [routes_list[i:i + 2] for i in range(0, len(routes_list), 2)]
-                route_rows = []
-                
-                for chunk in route_chunks:
-                    row_contents = []
-                    for r in chunk:
-                        r_name = r['RouteName']
-                        d_code = str(r.get('Direction', ''))
-                        dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
-                        route_key = f"{r_name}_{d_code}"
+                if liff_id: liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
+                else: liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
+
+                badge_color = "#00B900"
+                if "飲水機" in target_type: badge_color = "#00BFFF"
+                elif "AED" in target_type: badge_color = "#FF3333"
+                elif "公車" in target_type: badge_color = "#FF9900"
+
+                body_contents = [
+                    {"type": "text", "text": item["type"], "weight": "bold", "size": "xs", "color": badge_color},
+                    {"type": "text", "text": item["name"], "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
+                    {"type": "text", "text": f"📏 距離：約 {item['distance']} 公尺", "size": "xs", "color": "#888888", "margin": "sm"}
+                ]
+
+                if target_type == "🚏 公車站牌":
+                    routes_list = item.get('passing_routes', [])
+                    
+                    # 雙欄 50/50 網格佈局
+                    route_chunks = [routes_list[i:i + 2] for i in range(0, len(routes_list), 2)]
+                    route_rows = []
+                    
+                    for chunk in route_chunks:
+                        row_contents = []
+                        for r in chunk:
+                            r_name = r['RouteName']
+                            d_code = str(r.get('Direction', ''))
+                            dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
+                            route_key = f"{r_name}_{d_code}"
+                            
+                            specific_uid = item.get('stop_uids_map', {}).get(route_key, item['uid'])
+                            
+                            row_contents.append({
+                                "type": "box",
+                                "layout": "vertical",
+                                "backgroundColor": "#F0F4F8",
+                                "cornerRadius": "md",
+                                "paddingAll": "sm",
+                                "flex": 1,
+                                "action": {
+                                    "type": "postback",
+                                    "label": f"{r_name}({dir_label})",
+                                    "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"
+                                },
+                                "contents": [
+                                    {
+                                        "type": "text",
+                                        "text": f"🚌 {r_name} ({dir_label})",
+                                        "size": "xs",
+                                        "color": "#1E88E5",
+                                        "align": "center",
+                                        "weight": "bold",
+                                        "wrap": True
+                                    }
+                                ]
+                            })
                         
-                        specific_uid = item.get('stop_uids_map', {}).get(route_key, item['uid'])
+                        if len(chunk) == 1:
+                            row_contents.append({
+                                "type": "box",
+                                "layout": "vertical",
+                                "flex": 1
+                            })
                         
-                        # 每個按鈕皆給予 flex: 1，使其在單行中精準佔據 50% 寬度
-                        row_contents.append({
+                        route_rows.append({
+                            "type": "box",
+                            "layout": "horizontal",
+                            "spacing": "sm",
+                            "margin": "xs",
+                            "contents": row_contents
+                        })
+                    
+                    if route_rows:
+                        body_contents.append({
                             "type": "box",
                             "layout": "vertical",
-                            "backgroundColor": "#F0F4F8",
-                            "cornerRadius": "md",
-                            "paddingTop": "8px",
-                            "paddingBottom": "8px",
-                            "paddingStart": "4px",
-                            "paddingEnd": "4px",
-                            "flex": 1,
-                            "action": {
-                                "type": "postback",
-                                "label": f"{r_name}({dir_label})",
-                                "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"
-                            },
+                            "margin": "md",
+                            "spacing": "xs",
                             "contents": [
-                                {
-                                    "type": "text",
-                                    "text": f"🚌 {r_name} ({dir_label})",
-                                    "size": "xs",
-                                    "color": "#1E88E5",
-                                    "align": "center",
-                                    "weight": "bold",
-                                    "wrap": True
-                                }
+                                {"type": "text", "text": "👇 點擊車班查看所有行經站牌", "size": "xs", "color": "#555555", "weight": "bold", "margin": "xs"},
+                                *route_rows
                             ]
                         })
-                    
-                    # 若為奇數剩餘最後 1 個，補充一個透明 flex: 1 佔位方塊，維持左對齊 50% 寬度
-                    if len(chunk) == 1:
-                        row_contents.append({
-                            "type": "box",
-                            "layout": "vertical",
-                            "flex": 1
-                        })
-                    
-                    route_rows.append({
-                        "type": "box",
-                        "layout": "horizontal",
-                        "spacing": "sm",
-                        "margin": "xs",
-                        "contents": row_contents
-                    })
-                
-                if route_rows:
-                    body_contents.append({
-                        "type": "box",
-                        "layout": "vertical",
-                        "margin": "md",
-                        "spacing": "xs",
-                        "contents": [
-                            {"type": "text", "text": "👇 點擊車班查看所有行經站牌", "size": "xs", "color": "#555555", "weight": "bold", "margin": "xs"},
-                            *route_rows
-                        ]
-                    })
-            else:
-                body_contents.append({"type": "text", "text": item.get("extra_info", ""), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
+                else:
+                    body_contents.append({"type": "text", "text": item.get("extra_info", ""), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
 
-            bubble = {
-                "type": "bubble", 
-                "size": "mega",
-                "body": {"type": "box", "layout": "vertical", "contents": body_contents},
-                "footer": {
-                    "type": "box", "layout": "vertical", "spacing": "sm",
-                    "contents": [
-                        {"type": "button", "action": {"type": "uri", "label": "📍 地圖預覽", "uri": liff_map_url}, "style": "secondary", "height": "sm"},
-                        {"type": "button", "action": {"type": "uri", "label": "🗺️ 開始導航", "uri": google_navigation_url}, "style": "primary", "color": badge_color, "height": "sm"}
-                    ]
+                bubble = {
+                    "type": "bubble", 
+                    "size": "mega",
+                    "body": {"type": "box", "layout": "vertical", "contents": body_contents},
+                    "footer": {
+                        "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                            {"type": "button", "action": {"type": "uri", "label": "📍 地圖預覽", "uri": liff_map_url}, "style": "secondary", "height": "sm"},
+                            {"type": "button", "action": {"type": "uri", "label": "🗺️ 開始導航", "uri": google_navigation_url}, "style": "primary", "color": badge_color, "height": "sm"}
+                        ]
+                    }
                 }
-            }
-            carousel_contents["contents"].append(bubble)
-        
-        flex_container = FlexContainer.from_dict(carousel_contents)
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[FlexMessage(alt_text=f"已找到附近的{target_type}", contents=flex_container)])
-        )
+                carousel_contents["contents"].append(bubble)
+            
+            flex_container = FlexContainer.from_dict(carousel_contents)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[FlexMessage(alt_text=f"已找到附近的{target_type}", contents=flex_container)])
+            )
+    except Exception as e:
+        print(f"【Location Handler Error】處理定位時發生異常: {e}")
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text="查詢過程發生錯誤，請稍後再試。")])
+            )
 
 
 # ==========================================
