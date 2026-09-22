@@ -332,7 +332,7 @@ def handle_text_message(event):
     user_text = event.message.text
     
     if any(k in user_text for k in ["公車", "站牌", "搭車", "客運"]): target_type = "🚏 公車站牌"
-    elif any(k in user_text for k in ["公廁", "廁所", "洗手間", "尿尿"]): target_type = "🚻 公廁"
+    elif any(k in user_text for k in ["公廁", "廁所", "洗洗手問", "尿尿"]): target_type = "🚻 公廁"
     elif any(k in user_text for k in ["飲水機", "喝水", "裝水"]): target_type = "💧 飲水機"
     elif "AED" in user_text.upper() or "急救" in user_text: target_type = "🆘 AED"
     elif any(k in user_text.lower() for k in ["youbike", "腳踏車", "單車", "ubike"]): target_type = "🚲 YouBike"
@@ -396,55 +396,81 @@ def handle_location_message(event):
             ]
 
             if target_type == "🚏 公車站牌":
-                route_chips = []
-                # 採用輕量化「膠囊標籤 (Chip Box)」設計，完美解決邊界裁切與換行問題
-                for r in item.get('passing_routes', []): 
-                    r_name = r['RouteName']
-                    d_code = str(r.get('Direction', ''))
-                    dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
-                    route_key = f"{r_name}_{d_code}"
+                routes_list = item.get('passing_routes', [])
+                
+                # 【核心修改】：將車班資料每 2 個切成一列，強制構建雙欄網格 (2-Column Grid)
+                route_chunks = [routes_list[i:i + 2] for i in range(0, len(routes_list), 2)]
+                route_rows = []
+                
+                for chunk in route_chunks:
+                    row_contents = []
+                    for r in chunk:
+                        r_name = r['RouteName']
+                        d_code = str(r.get('Direction', ''))
+                        dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
+                        route_key = f"{r_name}_{d_code}"
+                        
+                        specific_uid = item.get('stop_uids_map', {}).get(route_key, item['uid'])
+                        
+                        # 每個按鈕皆給予 flex: 1，使其在單行中精準佔據 50% 寬度
+                        row_contents.append({
+                            "type": "box",
+                            "layout": "vertical",
+                            "backgroundColor": "#F0F4F8",
+                            "cornerRadius": "md",
+                            "paddingTop": "8px",
+                            "paddingBottom": "8px",
+                            "paddingStart": "4px",
+                            "paddingEnd": "4px",
+                            "flex": 1,
+                            "action": {
+                                "type": "postback",
+                                "label": f"{r_name}({dir_label})",
+                                "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"
+                            },
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": f"🚌 {r_name} ({dir_label})",
+                                    "size": "xs",
+                                    "color": "#1E88E5",
+                                    "align": "center",
+                                    "weight": "bold",
+                                    "wrap": True
+                                }
+                            ]
+                        })
                     
-                    specific_uid = item.get('stop_uids_map', {}).get(route_key, item['uid'])
+                    # 若為奇數剩餘最後 1 個，補充一個透明 flex: 1 佔位方塊，維持左對齊 50% 寬度
+                    if len(chunk) == 1:
+                        row_contents.append({
+                            "type": "box",
+                            "layout": "vertical",
+                            "flex": 1
+                        })
                     
-                    route_chips.append({
+                    route_rows.append({
                         "type": "box",
-                        "layout": "vertical",
-                        "backgroundColor": "#EAEAEA",
-                        "cornerRadius": "md",
-                        "paddingTop": "4px",
-                        "paddingBottom": "4px",
-                        "paddingStart": "10px",
-                        "paddingEnd": "10px",
+                        "layout": "horizontal",
+                        "spacing": "sm",
                         "margin": "xs",
-                        "action": {
-                            "type": "postback",
-                            "label": f"{r_name}({dir_label})",
-                            "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"
-                        },
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": f"{r_name}({dir_label})",
-                                "size": "xs",
-                                "color": "#333333",
-                                "align": "center",
-                                "weight": "bold"
-                            }
-                        ]
+                        "contents": row_contents
                     })
                 
-                if route_chips:
+                if route_rows:
                     body_contents.append({
-                        "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "spacing": "xs",
                         "contents": [
-                            {"type": "text", "text": "👇 點擊車班查看所有行經站牌", "size": "xs", "color": "#555555"},
-                            {"type": "box", "layout": "horizontal", "wrap": True, "contents": route_chips}
+                            {"type": "text", "text": "👇 點擊車班查看所有行經站牌", "size": "xs", "color": "#555555", "weight": "bold", "margin": "xs"},
+                            *route_rows
                         ]
                     })
             else:
                 body_contents.append({"type": "text", "text": item.get("extra_info", ""), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
 
-            # 將所有 LBS 卡片尺寸升級為 mega (大幅增加橫向與縱向容納寬度)
             bubble = {
                 "type": "bubble", 
                 "size": "mega",
