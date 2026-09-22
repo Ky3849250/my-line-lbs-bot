@@ -7,6 +7,7 @@ import urllib.parse
 import sqlite3
 import gzip
 import shutil
+import traceback
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
@@ -114,64 +115,78 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
         print("【警告】找不到 bus.db 檔案，無法執行公車查詢！")
         return []
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    lat_min, lat_max = user_latitude - 0.01, user_latitude + 0.01
-    lon_min, lon_max = user_longitude - 0.01, user_longitude + 0.01
-    
-    cursor.execute('''
-        SELECT * FROM bus_stops 
-        WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
-    ''', (lat_min, lat_max, lon_min, lon_max))
-    rows = cursor.fetchall()
-    conn.close()
-
-    raw_list = []
-    for row in rows:
-        dist = calculate_distance(user_latitude, user_longitude, row['lat'], row['lon'])
-        routes = json.loads(row['passing_routes']) if row['passing_routes'] else []
-        raw_list.append({
-            'uid': row['stop_uid'],
-            'name': row['stop_name'],
-            'lat': row['lat'],
-            'lon': row['lon'],
-            'routes': routes,
-            'dist': dist
-        })
-
-    raw_list.sort(key=lambda x: x['dist'])
-
-    grouped_stops = {}
-    for item in raw_list:
-        stop_name = item['name']
-        if stop_name not in grouped_stops:
-            grouped_stops[stop_name] = {
-                'uid': item['uid'],
-                'name': stop_name,
-                'type': '🚏 公車站牌',
-                'latitude': item['lat'],
-                'longitude': item['lon'],
-                'distance': round(item['dist']),
-                'passing_routes': [],
-                'seen_routes': set(),
-                'stop_uids_map': {}
-            }
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        target = grouped_stops[stop_name]
-        for r in item['routes']:
-            r_name = r.get('RouteName', '')
-            d_code = str(r.get('Direction', ''))
-            route_key = f"{r_name}_{d_code}"
-            
-            if route_key not in target['seen_routes']:
-                target['seen_routes'].add(route_key)
-                target['passing_routes'].append(r)
-                target['stop_uids_map'][route_key] = item['uid']
+        lat_min, lat_max = user_latitude - 0.01, user_latitude + 0.01
+        lon_min, lon_max = user_longitude - 0.01, user_longitude + 0.01
+        
+        cursor.execute('''
+            SELECT * FROM bus_stops 
+            WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
+        ''', (lat_min, lat_max, lon_min, lon_max))
+        rows = cursor.fetchall()
+        conn.close()
 
-    final_results = list(grouped_stops.values())
-    final_results.sort(key=lambda x: x['distance'])
-    return final_results[:5]
+        raw_list = []
+        for row in rows:
+            dist = calculate_distance(user_latitude, user_longitude, float(row['lat']), float(row['lon']))
+            try:
+                routes = json.loads(row['passing_routes']) if row['passing_routes'] else []
+            except Exception:
+                routes = []
+                
+            raw_list.append({
+                'uid': str(row['stop_uid']),
+                'name': str(row['stop_name']),
+                'lat': float(row['lat']),
+                'lon': float(row['lon']),
+                'routes': routes if isinstance(routes, list) else [],
+                'dist': dist
+            })
+
+        raw_list.sort(key=lambda x: x['dist'])
+
+        grouped_stops = {}
+        for item in raw_list:
+            stop_name = item['name']
+            if stop_name not in grouped_stops:
+                grouped_stops[stop_name] = {
+                    'uid': item['uid'],
+                    'name': stop_name,
+                    'type': '🚏 公車站牌',
+                    'latitude': item['lat'],
+                    'longitude': item['lon'],
+                    'distance': round(item['dist']),
+                    'passing_routes': [],
+                    'seen_routes': set(),
+                    'stop_uids_map': {}
+                }
+            
+            target = grouped_stops[stop_name]
+            for r in item['routes']:
+                if not isinstance(r, dict): continue
+                r_name = str(r.get('RouteName', '')).strip()
+                if not r_name: continue
+                d_code = str(r.get('Direction', '0'))
+                route_key = f"{r_name}_{d_code}"
+                
+                if route_key not in target['seen_routes']:
+                    target['seen_routes'].add(route_key)
+                    target['passing_routes'].append({
+                        'RouteName': r_name,
+                        'Direction': d_code,
+                        'RouteStops': r.get('RouteStops', [])
+                    })
+                    target['stop_uids_map'][route_key] = item['uid']
+
+        final_results = list(grouped_stops.values())
+        final_results.sort(key=lambda x: x['distance'])
+        return final_results[:5]
+    except Exception as e:
+        print(f"【fetch_bus_data 發生例外】: {e}\n{traceback.format_exc()}")
+        return []
 
 
 def fetch_aed_data(user_latitude: float, user_longitude: float) -> list:
@@ -371,7 +386,7 @@ def handle_location_message(event):
             line_bot_api = MessagingApi(api_client)
             if not search_results:
                 line_bot_api.reply_message_with_http_info(
-                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=f"方圓3公里內找不到【{target_type}】。")])
+                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=f"方圓1公里內找不到【{target_type}】。")])
                 )
                 return
 
@@ -379,7 +394,7 @@ def handle_location_message(event):
             
             for item in search_results:
                 google_navigation_url = f"https://www.google.com/maps/dir/?api=1&destination={item['latitude']},{item['longitude']}"
-                safe_name = urllib.parse.quote(item['name'])
+                safe_name = urllib.parse.quote(str(item['name']))
                 
                 if liff_id: liff_map_url = f"https://liff.line.me/{liff_id}?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
                 else: liff_map_url = f"https://my-line-lbs-bot.onrender.com/liff/map?lat={item['latitude']}&lng={item['longitude']}&name={safe_name}"
@@ -390,27 +405,28 @@ def handle_location_message(event):
                 elif "公車" in target_type: badge_color = "#FF9900"
 
                 body_contents = [
-                    {"type": "text", "text": item["type"], "weight": "bold", "size": "xs", "color": badge_color},
-                    {"type": "text", "text": item["name"], "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
+                    {"type": "text", "text": str(item["type"]), "weight": "bold", "size": "xs", "color": badge_color},
+                    {"type": "text", "text": str(item["name"]), "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
                     {"type": "text", "text": f"📏 距離：約 {item['distance']} 公尺", "size": "xs", "color": "#888888", "margin": "sm"}
                 ]
 
                 if target_type == "🚏 公車站牌":
                     routes_list = item.get('passing_routes', [])
                     
-                    # 雙欄 50/50 網格佈局
-                    route_chunks = [routes_list[i:i + 2] for i in range(0, len(routes_list), 2)]
+                    # 【方案 B 核心】卡片上僅顯示前 6 條車班
+                    display_routes = routes_list[:6]
+                    route_chunks = [display_routes[i:i + 2] for i in range(0, len(display_routes), 2)]
                     route_rows = []
                     
                     for chunk in route_chunks:
                         row_contents = []
                         for r in chunk:
-                            r_name = r['RouteName']
-                            d_code = str(r.get('Direction', ''))
+                            r_name = str(r.get('RouteName', ''))
+                            d_code = str(r.get('Direction', '0'))
                             dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
                             route_key = f"{r_name}_{d_code}"
                             
-                            specific_uid = item.get('stop_uids_map', {}).get(route_key, item['uid'])
+                            specific_uid = str(item.get('stop_uids_map', {}).get(route_key, item['uid']))
                             
                             row_contents.append({
                                 "type": "box",
@@ -453,6 +469,21 @@ def handle_location_message(event):
                         })
                     
                     if route_rows:
+                        # 若該站牌公車路線超過 6 條，底部加入「查看全部路線」按鈕
+                        extra_button = []
+                        if len(routes_list) > 6:
+                            extra_button.append({
+                                "type": "button",
+                                "action": {
+                                    "type": "postback",
+                                    "label": f"🔍 查看此站全部 {len(routes_list)} 條車班",
+                                    "data": f"action=all_bus_routes&uid={item['uid']}&stop_name={urllib.parse.quote(item['name'])}"
+                                },
+                                "style": "secondary",
+                                "height": "sm",
+                                "margin": "sm"
+                            })
+
                         body_contents.append({
                             "type": "box",
                             "layout": "vertical",
@@ -460,11 +491,12 @@ def handle_location_message(event):
                             "spacing": "xs",
                             "contents": [
                                 {"type": "text", "text": "👇 點擊車班查看所有行經站牌", "size": "xs", "color": "#555555", "weight": "bold", "margin": "xs"},
-                                *route_rows
+                                *route_rows,
+                                *extra_button
                             ]
                         })
                 else:
-                    body_contents.append({"type": "text", "text": item.get("extra_info", ""), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
+                    body_contents.append({"type": "text", "text": str(item.get("extra_info", "")), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
 
                 bubble = {
                     "type": "bubble", 
@@ -485,7 +517,7 @@ def handle_location_message(event):
                 ReplyMessageRequest(reply_token=event.reply_token, messages=[FlexMessage(alt_text=f"已找到附近的{target_type}", contents=flex_container)])
             )
     except Exception as e:
-        print(f"【Location Handler Error】處理定位時發生異常: {e}")
+        print(f"【Location Exception Log】處理定位時發生異常:\n{traceback.format_exc()}")
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message_with_http_info(
@@ -494,16 +526,129 @@ def handle_location_message(event):
 
 
 # ==========================================
-# Postback 事件處理：生成完整的路線動態圖
+# Postback 事件處理：生成全車班選單與路線動態圖
 # ==========================================
 @handler.add(PostbackEvent)
 def handle_postback(event):
     data = event.postback.data
     parsed = urllib.parse.parse_qs(data)
+    action = parsed.get('action', [''])[0]
     
-    if parsed.get('action', [''])[0] == 'bus_route':
+    # 【功能 1】使用者點擊「查看此站全部車班」-> 回傳獨立的全車班雙欄 Flex 選單
+    if action == 'all_bus_routes':
         uid = parsed.get('uid', [''])[0]
-        route_name = parsed.get('route', [''])[0]
+        stop_name = urllib.parse.unquote(parsed.get('stop_name', [''])[0])
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM bus_stops WHERE stop_name = ?', (stop_name,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows: return
+        
+        # 整合此站名的所有行經車班
+        all_routes = []
+        seen_keys = set()
+        stop_uids_map = {}
+        
+        for r_row in rows:
+            try:
+                r_json = json.loads(r_row['passing_routes']) if r_row['passing_routes'] else []
+            except Exception:
+                r_json = []
+                
+            for r in r_json:
+                if not isinstance(r, dict): continue
+                r_name = str(r.get('RouteName', '')).strip()
+                if not r_name: continue
+                d_code = str(r.get('Direction', '0'))
+                route_key = f"{r_name}_{d_code}"
+                
+                if route_key not in seen_keys:
+                    seen_keys.add(route_key)
+                    all_routes.append(r)
+                    stop_uids_map[route_key] = str(r_row['stop_uid'])
+        
+        # 建立雙欄位點擊選單
+        route_chunks = [all_routes[i:i + 2] for i in range(0, len(all_routes), 2)]
+        route_rows = []
+        
+        for chunk in route_chunks:
+            row_contents = []
+            for r in chunk:
+                r_name = str(r.get('RouteName', ''))
+                d_code = str(r.get('Direction', '0'))
+                dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
+                route_key = f"{r_name}_{d_code}"
+                
+                specific_uid = stop_uids_map.get(route_key, uid)
+                
+                row_contents.append({
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#F0F4F8",
+                    "cornerRadius": "md",
+                    "paddingAll": "sm",
+                    "flex": 1,
+                    "action": {
+                        "type": "postback",
+                        "label": f"{r_name}({dir_label})",
+                        "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"
+                    },
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"🚌 {r_name} ({dir_label})",
+                            "size": "xs",
+                            "color": "#1E88E5",
+                            "align": "center",
+                            "weight": "bold",
+                            "wrap": True
+                        }
+                    ]
+                })
+            
+            if len(chunk) == 1:
+                row_contents.append({"type": "box", "layout": "vertical", "flex": 1})
+            
+            route_rows.append({
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "xs",
+                "contents": row_contents
+            })
+            
+        bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box", "layout": "vertical", "backgroundColor": "#FF9900",
+                "contents": [{"type": "text", "text": f"🚏 【{stop_name}】全站車班 ({len(all_routes)}條)", "color": "#FFFFFF", "weight": "bold", "size": "md"}]
+            },
+            "body": {
+                "type": "box", "layout": "vertical", 
+                "contents": [
+                    {"type": "text", "text": "👇 點擊車班查看完整行經站牌：", "size": "xs", "color": "#555555", "margin": "xs", "weight": "bold"},
+                    {"type": "box", "layout": "vertical", "margin": "md", "contents": route_rows}
+                ]
+            }
+        }
+        
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token, 
+                    messages=[FlexMessage(alt_text=f"{stop_name}全車班選單", contents=FlexContainer.from_dict(bubble))]
+                )
+            )
+
+    # 【功能 2】點擊任何車班 -> 生成動態路線時間軸
+    elif action == 'bus_route':
+        uid = parsed.get('uid', [''])[0]
+        route_name = urllib.parse.unquote(parsed.get('route', [''])[0])
         dir_code = parsed.get('dir', [''])[0]
         
         conn = get_db_connection()
@@ -514,12 +659,16 @@ def handle_postback(event):
         
         if not row: return
         
-        current_stop_name = row['stop_name']
-        routes = json.loads(row['passing_routes'])
+        current_stop_name = str(row['stop_name'])
+        try:
+            routes = json.loads(row['passing_routes']) if row['passing_routes'] else []
+        except Exception:
+            routes = []
         
         target_route = None
         for r in routes:
-            if r['RouteName'] == route_name and str(r.get('Direction', '')) == dir_code:
+            if not isinstance(r, dict): continue
+            if str(r.get('RouteName', '')) == route_name and str(r.get('Direction', '')) == dir_code:
                 target_route = r
                 break
                 
@@ -540,7 +689,7 @@ def handle_postback(event):
             timeline_contents.append({"type": "text", "text": f"↑ ...省略前方 {start_idx} 站", "color": "#888888", "size": "xs", "margin": "sm"})
 
         for i in range(start_idx, end_idx):
-            s_name = stops_list[i]
+            s_name = str(stops_list[i])
             
             icon = ""
             if any(k in s_name for k in ["捷運", "MRT"]): icon = " 🚇"
