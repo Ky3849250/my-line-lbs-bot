@@ -116,7 +116,6 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 限制查詢範圍約方圓 1.1 公里，降低運算負擔
     lat_min, lat_max = user_latitude - 0.01, user_latitude + 0.01
     lon_min, lon_max = user_longitude - 0.01, user_longitude + 0.01
     
@@ -140,10 +139,9 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
             'dist': dist
         })
 
-    # 先依距離排序
     raw_list.sort(key=lambda x: x['dist'])
 
-    # 按站牌名稱 (stop_name) 進行合併，達成「一站一張卡片」
+    # 按站牌名稱歸組與路線合併
     grouped_stops = {}
     for item in raw_list:
         stop_name = item['name']
@@ -157,7 +155,7 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
                 'distance': round(item['dist']),
                 'passing_routes': [],
                 'seen_routes': set(),
-                'stop_uids_map': {}  # 紀錄每條路線/方向對應的具體 uid
+                'stop_uids_map': {}
             }
         
         target = grouped_stops[stop_name]
@@ -171,7 +169,6 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
                 target['passing_routes'].append(r)
                 target['stop_uids_map'][route_key] = item['uid']
 
-    # 轉為列表並依距離排序，取前 5 個完全不同的最近站牌
     final_results = list(grouped_stops.values())
     final_results.sort(key=lambda x: x['distance'])
     return final_results[:5]
@@ -399,43 +396,58 @@ def handle_location_message(event):
             ]
 
             if target_type == "🚏 公車站牌":
-                route_buttons = []
-                # 將該站牌包含的所有路線做成 Postback 按鈕
+                route_chips = []
+                # 採用輕量化「膠囊標籤 (Chip Box)」設計，完美解決邊界裁切與換行問題
                 for r in item.get('passing_routes', []): 
                     r_name = r['RouteName']
                     d_code = str(r.get('Direction', ''))
                     dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
                     route_key = f"{r_name}_{d_code}"
                     
-                    # 取得該路線對應具體的 stop_uid
                     specific_uid = item.get('stop_uids_map', {}).get(route_key, item['uid'])
                     
-                    route_buttons.append({
-                        "type": "button",
+                    route_chips.append({
+                        "type": "box",
+                        "layout": "vertical",
+                        "backgroundColor": "#EAEAEA",
+                        "cornerRadius": "md",
+                        "paddingTop": "4px",
+                        "paddingBottom": "4px",
+                        "paddingStart": "10px",
+                        "paddingEnd": "10px",
+                        "margin": "xs",
                         "action": {
                             "type": "postback",
                             "label": f"{r_name}({dir_label})",
                             "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"
                         },
-                        "style": "secondary",
-                        "height": "sm",
-                        "margin": "xs",
-                        "flex": 0 
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": f"{r_name}({dir_label})",
+                                "size": "xs",
+                                "color": "#333333",
+                                "align": "center",
+                                "weight": "bold"
+                            }
+                        ]
                     })
                 
-                if route_buttons:
+                if route_chips:
                     body_contents.append({
                         "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
                         "contents": [
                             {"type": "text", "text": "👇 點擊車班查看所有行經站牌", "size": "xs", "color": "#555555"},
-                            {"type": "box", "layout": "horizontal", "wrap": True, "contents": route_buttons}
+                            {"type": "box", "layout": "horizontal", "wrap": True, "contents": route_chips}
                         ]
                     })
             else:
                 body_contents.append({"type": "text", "text": item.get("extra_info", ""), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
 
+            # 將所有 LBS 卡片尺寸升級為 mega (大幅增加橫向與縱向容納寬度)
             bubble = {
-                "type": "bubble", "size": "kilo",
+                "type": "bubble", 
+                "size": "mega",
                 "body": {"type": "box", "layout": "vertical", "contents": body_contents},
                 "footer": {
                     "type": "box", "layout": "vertical", "spacing": "sm",
@@ -497,7 +509,7 @@ def handle_postback(event):
         
         timeline_contents = []
         if start_idx > 0:
-            timeline_contents.append({"type": "text", "text": f"↑ ...省略聲明 {start_idx} 站", "color": "#888888", "size": "xs", "margin": "sm"})
+            timeline_contents.append({"type": "text", "text": f"↑ ...省略前方 {start_idx} 站", "color": "#888888", "size": "xs", "margin": "sm"})
 
         for i in range(start_idx, end_idx):
             s_name = stops_list[i]
@@ -507,7 +519,6 @@ def handle_postback(event):
             elif any(k in s_name for k in ["火車", "車站", "台鐵"]): icon = " 🚆"
             elif "高鐵" in s_name: icon = " 🚄"
             
-            # 過去淡化、當前紅色、未來黑色
             if i < current_idx:
                 timeline_contents.append({
                     "type": "text", "text": f"⚪ {s_name}{icon}", 
