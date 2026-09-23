@@ -108,26 +108,20 @@ def get_db_connection():
     return conn
 
 def get_stop_direction_hint(stop_name: str, passing_routes: list) -> str:
+    """ 採用「物理比對法」：提取車班路線的下一站名稱，方便使用者與實體站牌對照 """
     next_stops = []
-    dest_stops = []
-    for r in passing_routes[:8]:
+    for r in passing_routes:
         stops = r.get('RouteStops', [])
         if stop_name in stops:
             idx = stops.index(stop_name)
             if idx + 1 < len(stops):
                 next_stops.append(str(stops[idx + 1]))
-            if len(stops) > 0 and idx != len(stops) - 1:
-                dest_stops.append(str(stops[-1]))
-    
-    unique_dests = list(dict.fromkeys(dest_stops))[:2]
-    if unique_dests:
-        return f"🧭 往 {' / '.join(unique_dests)} 方向"
     
     unique_nexts = list(dict.fromkeys(next_stops))[:2]
     if unique_nexts:
-        return f"🧭 下一站：{' / '.join(unique_nexts)}"
+        return f"🚏 下一站：{' / '.join(unique_nexts)}"
     
-    return "🧭 順/逆向單一站牌"
+    return "🚏 路線終點站"
 
 # ==========================================
 # 公車站牌核心查詢：依「實體方位 (<15m)」拆分順逆向站牌卡片
@@ -518,7 +512,6 @@ def handle_location_message(event):
                                 ]
                             })
                         
-                        # 使用標準 filler 組件進行補位，徹底解決空 contents 導致 HTTP 400 錯退問題
                         if len(chunk) == 1:
                             row_contents.append({
                                 "type": "box",
@@ -736,7 +729,7 @@ def handle_postback(event):
                     "layout": "horizontal",
                     "spacing": "sm",
                     "margin": "xs",
-                    "contents": route_rows
+                    "contents": row_contents
                 })
                 
             bubble = {
