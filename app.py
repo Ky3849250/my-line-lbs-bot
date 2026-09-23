@@ -413,7 +413,6 @@ def handle_location_message(event):
                 if target_type == "🚏 公車站牌":
                     routes_list = item.get('passing_routes', [])
                     
-                    # 方案 B：卡片僅顯示前 6 條車班
                     display_routes = routes_list[:6]
                     route_chunks = [display_routes[i:i + 2] for i in range(0, len(display_routes), 2)]
                     route_rows = []
@@ -427,7 +426,7 @@ def handle_location_message(event):
                             route_key = f"{r_name}_{d_code}"
                             
                             specific_uid = str(item.get('stop_uids_map', {}).get(route_key, item['uid']))
-                            btn_label = f"{r_name}({dir_label})"[:20]  # 嚴格限制標籤 <= 20 字數上限
+                            btn_label = f"{r_name}({dir_label})"[:20]
                             
                             row_contents.append({
                                 "type": "box",
@@ -454,11 +453,13 @@ def handle_location_message(event):
                                 ]
                             })
                         
+                        # 補位 Box 必須包含 contents: [] 屬性，防範 LINE API HTTP 400 錯退
                         if len(chunk) == 1:
                             row_contents.append({
                                 "type": "box",
                                 "layout": "vertical",
-                                "flex": 1
+                                "flex": 1,
+                                "contents": []
                             })
                         
                         route_rows.append({
@@ -477,7 +478,7 @@ def handle_location_message(event):
                                 "type": "button",
                                 "action": {
                                     "type": "postback",
-                                    "label": btn_text[:20],  # 截斷至 20 字，確保 LINE API 接受
+                                    "label": btn_text[:20],
                                     "data": f"action=all_bus_routes&uid={item['uid']}&stop_name={urllib.parse.quote(str(item['name']))}"
                                 },
                                 "style": "secondary",
@@ -547,11 +548,9 @@ def handle_postback(event):
             
             conn = get_db_connection()
             cursor = conn.cursor()
-            # 優先以 UID 匹配，無資料則以站名進行比對
             cursor.execute('SELECT * FROM bus_stops WHERE stop_uid = ? OR stop_name = ?', (uid, stop_name))
             rows = cursor.fetchall()
             
-            # 若仍查無資料，執行模糊比對
             if not rows and stop_name:
                 cursor.execute('SELECT * FROM bus_stops WHERE stop_name LIKE ?', (f"%{stop_name}%",))
                 rows = cursor.fetchall()
@@ -604,7 +603,6 @@ def handle_postback(event):
                     )
                 return
 
-            # 上限 30 條路線，確保單一 Flex JSON < 50KB
             display_all_routes = all_routes[:30]
             route_chunks = [display_all_routes[i:i + 2] for i in range(0, len(display_all_routes), 2)]
             route_rows = []
@@ -645,8 +643,14 @@ def handle_postback(event):
                         ]
                     })
                 
+                # 補位 Box 必須包含 contents: [] 屬性，修正溝子口(幸福華興)等奇數車班站牌點擊崩潰問題
                 if len(chunk) == 1:
-                    row_contents.append({"type": "box", "layout": "vertical", "flex": 1})
+                    row_contents.append({
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "contents": []
+                    })
                 
                 route_rows.append({
                     "type": "box",
@@ -756,7 +760,7 @@ def handle_postback(event):
                 elif i == current_idx:
                     timeline_contents.append({
                         "type": "text", "text": f"📍 {s_name}{icon} (當前站)", 
-                        "color": "#FF0000", "weight": "bold", "size": "md", "margin": "sm"
+                        "color": "#FF0000", "weight": "bold", "size": "md", "margin": "xs"
                     })
                 else:
                     timeline_contents.append({
