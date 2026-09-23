@@ -108,7 +108,6 @@ def get_db_connection():
     return conn
 
 def get_stop_direction_hint(stop_name: str, passing_routes: list) -> str:
-    """ 自動分析車班路線的終點站或下一站，產生明確的方向標示 """
     next_stops = []
     dest_stops = []
     for r in passing_routes[:8]:
@@ -171,7 +170,6 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
 
         raw_list.sort(key=lambda x: x['dist'])
 
-        # 依據「同站名 + 實體距離 < 15m」歸組，將對面的站牌分開成獨立卡片
         grouped_cards = []
         
         for item in raw_list:
@@ -183,7 +181,7 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
             for card in grouped_cards:
                 if card['name'] == stop_name:
                     d = calculate_distance(item_lat, item_lon, card['latitude'], card['longitude'])
-                    if d < 15.0:  # 同一側站牌 (小於 15 公尺) 進行合併
+                    if d < 15.0:  # 同一側站牌 (小於 15 公尺) 合併
                         matched_card = card
                         break
                         
@@ -468,7 +466,6 @@ def handle_location_message(event):
                 ]
 
                 if target_type == "🚏 公車站牌":
-                    # 呈現方向指引文字標籤
                     dir_hint_text = item.get('dir_hint', '')
                     if dir_hint_text:
                         body_contents.append({
@@ -521,12 +518,13 @@ def handle_location_message(event):
                                 ]
                             })
                         
+                        # 使用標準 filler 組件進行補位，徹底解決空 contents 導致 HTTP 400 錯退問題
                         if len(chunk) == 1:
                             row_contents.append({
                                 "type": "box",
                                 "layout": "vertical",
                                 "flex": 1,
-                                "contents": []
+                                "contents": [{"type": "filler"}]
                             })
                         
                         route_rows.append({
@@ -616,7 +614,6 @@ def handle_postback(event):
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            # 先根據特定的 stop_uid 找到原點站牌位置
             cursor.execute('SELECT * FROM bus_stops WHERE stop_uid = ?', (uid,))
             target_row = cursor.fetchone()
             
@@ -624,7 +621,6 @@ def handle_postback(event):
                 lat, lon = float(target_row['lat']), float(target_row['lon'])
                 lat_min, lat_max = lat - 0.0002, lat + 0.0002
                 lon_min, lon_max = lon - 0.0002, lon + 0.0002
-                # 撈出同一側實體距離極近 (15m內) 的同名站牌
                 cursor.execute('''
                     SELECT * FROM bus_stops 
                     WHERE stop_name = ? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
@@ -732,7 +728,7 @@ def handle_postback(event):
                         "type": "box",
                         "layout": "vertical",
                         "flex": 1,
-                        "contents": []
+                        "contents": [{"type": "filler"}]
                     })
                 
                 route_rows.append({
@@ -740,7 +736,7 @@ def handle_postback(event):
                     "layout": "horizontal",
                     "spacing": "sm",
                     "margin": "xs",
-                    "contents": row_contents
+                    "contents": route_rows
                 })
                 
             bubble = {
@@ -771,7 +767,7 @@ def handle_postback(event):
                     )
                 )
 
-        # 【功能 2】點擊車班 -> 生成動態路線時間軸
+        # 【功能 2】點擊車班 -> 生成路線時間軸
         elif action == 'bus_route':
             uid = parsed.get('uid', [''])[0]
             raw_route = parsed.get('route', [''])[0]
