@@ -107,8 +107,31 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def get_stop_direction_hint(stop_name: str, passing_routes: list) -> str:
+    """ 自動分析車班路線的終點站或下一站，產生明確的方向標示 """
+    next_stops = []
+    dest_stops = []
+    for r in passing_routes[:8]:
+        stops = r.get('RouteStops', [])
+        if stop_name in stops:
+            idx = stops.index(stop_name)
+            if idx + 1 < len(stops):
+                next_stops.append(str(stops[idx + 1]))
+            if len(stops) > 0 and idx != len(stops) - 1:
+                dest_stops.append(str(stops[-1]))
+    
+    unique_dests = list(dict.fromkeys(dest_stops))[:2]
+    if unique_dests:
+        return f"🧭 往 {' / '.join(unique_dests)} 方向"
+    
+    unique_nexts = list(dict.fromkeys(next_stops))[:2]
+    if unique_nexts:
+        return f"🧭 下一站：{' / '.join(unique_nexts)}"
+    
+    return "🧭 順/逆向單一站牌"
+
 # ==========================================
-# 公車站牌核心查詢：一站一張卡片 + 合併所有路線
+# 公車站牌核心查詢：依「實體方位 (<15m)」拆分順逆向站牌卡片
 # ==========================================
 def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
     if not os.path.exists(BUS_DB_PATH):
@@ -148,42 +171,76 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
 
         raw_list.sort(key=lambda x: x['dist'])
 
-        grouped_stops = {}
+        # 依據「同站名 + 實體距離 < 15m」歸組，將對面的站牌分開成獨立卡片
+        grouped_cards = []
+        
         for item in raw_list:
             stop_name = item['name']
-            if stop_name not in grouped_stops:
-                grouped_stops[stop_name] = {
+            item_lat = item['lat']
+            item_lon = item['lon']
+            
+            matched_card = None
+            for card in grouped_cards:
+                if card['name'] == stop_name:
+                    d = calculate_distance(item_lat, item_lon, card['latitude'], card['longitude'])
+                    if d < 15.0:  # 同一側站牌 (小於 15 公尺) 進行合併
+                        matched_card = card
+                        break
+                        
+            if matched_card:
+                for r in item['routes']:
+                    if not isinstance(r, dict): continue
+                    r_name = str(r.get('RouteName', '')).strip()
+                    if not r_name: continue
+                    d_code = str(r.get('Direction', '0'))
+                    route_key = f"{r_name}_{d_code}"
+                    
+                    if route_key not in matched_card['seen_routes']:
+                        matched_card['seen_routes'].add(route_key)
+                        matched_card['passing_routes'].append({
+                            'RouteName': r_name,
+                            'Direction': d_code,
+                            'RouteStops': r.get('RouteStops', [])
+                        })
+                        matched_card['stop_uids_map'][route_key] = item['uid']
+            else:
+                seen_routes = set()
+                passing_routes = []
+                stop_uids_map = {}
+                
+                for r in item['routes']:
+                    if not isinstance(r, dict): continue
+                    r_name = str(r.get('RouteName', '')).strip()
+                    if not r_name: continue
+                    d_code = str(r.get('Direction', '0'))
+                    route_key = f"{r_name}_{d_code}"
+                    
+                    if route_key not in seen_routes:
+                        seen_routes.add(route_key)
+                        passing_routes.append({
+                            'RouteName': r_name,
+                            'Direction': d_code,
+                            'RouteStops': r.get('RouteStops', [])
+                        })
+                        stop_uids_map[route_key] = item['uid']
+                        
+                grouped_cards.append({
                     'uid': item['uid'],
                     'name': stop_name,
                     'type': '🚏 公車站牌',
-                    'latitude': item['lat'],
-                    'longitude': item['lon'],
+                    'latitude': item_lat,
+                    'longitude': item_lon,
                     'distance': round(item['dist']),
-                    'passing_routes': [],
-                    'seen_routes': set(),
-                    'stop_uids_map': {}
-                }
-            
-            target = grouped_stops[stop_name]
-            for r in item['routes']:
-                if not isinstance(r, dict): continue
-                r_name = str(r.get('RouteName', '')).strip()
-                if not r_name: continue
-                d_code = str(r.get('Direction', '0'))
-                route_key = f"{r_name}_{d_code}"
-                
-                if route_key not in target['seen_routes']:
-                    target['seen_routes'].add(route_key)
-                    target['passing_routes'].append({
-                        'RouteName': r_name,
-                        'Direction': d_code,
-                        'RouteStops': r.get('RouteStops', [])
-                    })
-                    target['stop_uids_map'][route_key] = item['uid']
+                    'passing_routes': passing_routes,
+                    'seen_routes': seen_routes,
+                    'stop_uids_map': stop_uids_map
+                })
 
-        final_results = list(grouped_stops.values())
-        final_results.sort(key=lambda x: x['distance'])
-        return final_results[:5]
+        for card in grouped_cards:
+            card['dir_hint'] = get_stop_direction_hint(card['name'], card['passing_routes'])
+
+        grouped_cards.sort(key=lambda x: x['distance'])
+        return grouped_cards[:5]
     except Exception as e:
         print(f"【fetch_bus_data 發生例外】: {e}\n{traceback.format_exc()}")
         return []
@@ -411,8 +468,19 @@ def handle_location_message(event):
                 ]
 
                 if target_type == "🚏 公車站牌":
+                    # 呈現方向指引文字標籤
+                    dir_hint_text = item.get('dir_hint', '')
+                    if dir_hint_text:
+                        body_contents.append({
+                            "type": "text",
+                            "text": dir_hint_text,
+                            "size": "xs",
+                            "color": "#E65100",
+                            "weight": "bold",
+                            "margin": "xs"
+                        })
+
                     routes_list = item.get('passing_routes', [])
-                    
                     display_routes = routes_list[:6]
                     route_chunks = [display_routes[i:i + 2] for i in range(0, len(display_routes), 2)]
                     route_rows = []
@@ -453,7 +521,6 @@ def handle_location_message(event):
                                 ]
                             })
                         
-                        # 補位 Box 必須包含 contents: [] 屬性，防範 LINE API HTTP 400 錯退
                         if len(chunk) == 1:
                             row_contents.append({
                                 "type": "box",
@@ -528,7 +595,7 @@ def handle_location_message(event):
 
 
 # ==========================================
-# Postback 事件處理：生成全車班選單與路線動態圖
+# Postback 事件處理：生成該單向站牌全車班選單與動態圖
 # ==========================================
 @handler.add(PostbackEvent)
 def handle_postback(event):
@@ -537,7 +604,7 @@ def handle_postback(event):
         parsed = urllib.parse.parse_qs(data)
         action = parsed.get('action', [''])[0]
         
-        # 【功能 1】點擊「查看此站全部車班」-> 回傳獨立全車班選單
+        # 【功能 1】點擊「查看此站全部車班」-> 抓取該單一實體站牌 (<15m) 的所有車班
         if action == 'all_bus_routes':
             uid = parsed.get('uid', [''])[0]
             raw_stop_name = parsed.get('stop_name', [''])[0]
@@ -548,11 +615,26 @@ def handle_postback(event):
             
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM bus_stops WHERE stop_uid = ? OR stop_name = ?', (uid, stop_name))
-            rows = cursor.fetchall()
             
-            if not rows and stop_name:
-                cursor.execute('SELECT * FROM bus_stops WHERE stop_name LIKE ?', (f"%{stop_name}%",))
+            # 先根據特定的 stop_uid 找到原點站牌位置
+            cursor.execute('SELECT * FROM bus_stops WHERE stop_uid = ?', (uid,))
+            target_row = cursor.fetchone()
+            
+            if target_row:
+                lat, lon = float(target_row['lat']), float(target_row['lon'])
+                lat_min, lat_max = lat - 0.0002, lat + 0.0002
+                lon_min, lon_max = lon - 0.0002, lon + 0.0002
+                # 撈出同一側實體距離極近 (15m內) 的同名站牌
+                cursor.execute('''
+                    SELECT * FROM bus_stops 
+                    WHERE stop_name = ? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
+                ''', (stop_name, lat_min, lat_max, lon_min, lon_max))
+                rows = cursor.fetchall()
+            else:
+                rows = []
+                
+            if not rows:
+                cursor.execute('SELECT * FROM bus_stops WHERE stop_name = ? OR stop_uid = ?', (stop_name, uid))
                 rows = cursor.fetchall()
                 
             conn.close()
@@ -603,6 +685,8 @@ def handle_postback(event):
                     )
                 return
 
+            dir_hint = get_stop_direction_hint(actual_stop_name, all_routes)
+
             display_all_routes = all_routes[:30]
             route_chunks = [display_all_routes[i:i + 2] for i in range(0, len(display_all_routes), 2)]
             route_rows = []
@@ -643,7 +727,6 @@ def handle_postback(event):
                         ]
                     })
                 
-                # 補位 Box 必須包含 contents: [] 屬性，修正溝子口(幸福華興)等奇數車班站牌點擊崩潰問題
                 if len(chunk) == 1:
                     row_contents.append({
                         "type": "box",
@@ -665,7 +748,10 @@ def handle_postback(event):
                 "size": "mega",
                 "header": {
                     "type": "box", "layout": "vertical", "backgroundColor": "#FF9900",
-                    "contents": [{"type": "text", "text": f"🚏 【{actual_stop_name}】全站車班 ({len(all_routes)}條)", "color": "#FFFFFF", "weight": "bold", "size": "md"}]
+                    "contents": [
+                        {"type": "text", "text": f"🚏 【{actual_stop_name}】全站車班 ({len(all_routes)}條)", "color": "#FFFFFF", "weight": "bold", "size": "md"},
+                        {"type": "text", "text": dir_hint, "color": "#FFF3E0", "size": "xs", "margin": "xs"}
+                    ]
                 },
                 "body": {
                     "type": "box", "layout": "vertical", 
@@ -685,7 +771,7 @@ def handle_postback(event):
                     )
                 )
 
-        # 【功能 2】點擊車班 -> 生成路線時間軸
+        # 【功能 2】點擊車班 -> 生成動態路線時間軸
         elif action == 'bus_route':
             uid = parsed.get('uid', [''])[0]
             raw_route = parsed.get('route', [''])[0]
