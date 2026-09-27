@@ -39,6 +39,10 @@ REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
+# 第三方油價 API 設定
+SUPERIOR_API_URL = "https://superiorapis-creator.cteam.com.tw/manager/feature/proxy/ab930e2f2d73/pub_ab931a177e6e"
+SUPERIOR_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJjZXJ0IjoiOTFmZmFiYjk1ZjE2MzA0MzAwNTEyMzliZmNjZDc1YTUxN2I0M2UyNSIsImlhdCI6MTc5MDUyMTU3MH0.H0v3fDWq4iEoUt6VOUc3rH3siYV6VKcDRjM_IKoeOfE"
+
 # ==========================================
 # 核心載入：啟動時將本地資料庫載入記憶體
 # ==========================================
@@ -46,12 +50,19 @@ LOCAL_AED_DATABASE = []
 LOCAL_TOILET_DATABASE = []
 LOCAL_WATER_DATABASE = []
 LOCAL_GAS_DATABASE = []
+FALLBACK_PRICE_DATABASE = {
+    "92無鉛汽油": "31.2",
+    "95無鉛汽油": "32.7",
+    "98無鉛汽油": "34.7",
+    "超級柴油": "29.9"
+}
 
 BASE_DIR = os.path.dirname(__file__)
 AED_JSON_PATH = os.path.join(BASE_DIR, "aed_formatted.json")
 TOILET_JSON_PATH = os.path.join(BASE_DIR, "toilet.json")
 WATER_JSON_PATH = os.path.join(BASE_DIR, "water_fountains_fixed_2_completed.json")
 GAS_JSON_PATH = os.path.join(BASE_DIR, "gas_stations.json")
+PRICE_JSON_PATH = os.path.join(BASE_DIR, "sixtypeoillistprice.json")
 BUS_DB_PATH = os.path.join(BASE_DIR, "bus.db")
 BUS_GZ_PATH = os.path.join(BASE_DIR, "bus.db.gz")
 
@@ -86,12 +97,46 @@ if os.path.exists(WATER_JSON_PATH):
             LOCAL_WATER_DATABASE = json.load(f)
     except Exception: pass
 
-# 5. 直接讀取已優化的加油站純陣列 JSON
+# 5. 載入備援油價 JSON
+if os.path.exists(PRICE_JSON_PATH):
+    try:
+        with open(PRICE_JSON_PATH, "r", encoding="utf-8") as f:
+            price_data = json.load(f)
+            for item in price_data:
+                p_name = item.get("產品名稱", "")
+                p_val = item.get("參考牌價_金額")
+                if p_val:
+                    if "92" in p_name: FALLBACK_PRICE_DATABASE["92無鉛汽油"] = str(p_val)
+                    elif "95" in p_name: FALLBACK_PRICE_DATABASE["95無鉛汽油"] = str(p_val)
+                    elif "98" in p_name: FALLBACK_PRICE_DATABASE["98無鉛汽油"] = str(p_val)
+                    elif "超級柴油" in p_name: FALLBACK_PRICE_DATABASE["超級柴油"] = str(p_val)
+        print("【成功載入】離線備援油價資料庫。")
+    except Exception as e:
+        print(f"【載入失敗】備援油價讀取異常: {e}")
+
+# 6. 讀取加油站 JSON 並執行「同站代號屬性合併去重」
 if os.path.exists(GAS_JSON_PATH):
     try:
         with open(GAS_JSON_PATH, "r", encoding="utf-8") as f:
-            LOCAL_GAS_DATABASE = json.load(f)
-            print(f"【成功載入】加油站資料庫共 {len(LOCAL_GAS_DATABASE)} 筆紀錄。")
+            raw_gas_data = json.load(f)
+            merged_gas_db = {}
+            for st in raw_gas_data:
+                if not isinstance(st, dict): continue
+                sid = st.get("站代號")
+                if not sid:
+                    sid = f"{st.get('站名', '')}_{st.get('緯度', '')}"
+                
+                if sid not in merged_gas_db:
+                    merged_gas_db[sid] = st.copy()
+                else:
+                    for key, val in st.items():
+                        old_val = merged_gas_db[sid].get(key)
+                        if str(val) == "1" or (isinstance(val, str) and val.strip() and val.strip() != "無"):
+                            if str(old_val) != "1":
+                                merged_gas_db[sid][key] = val
+
+            LOCAL_GAS_DATABASE = list(merged_gas_db.values())
+            print(f"【成功載入】加油站資料庫共 {len(LOCAL_GAS_DATABASE)} 筆紀錄 (經站點合併優化)。")
     except Exception as e:
         print(f"【載入失敗】加油站讀取異常: {e}")
 
@@ -119,54 +164,48 @@ def get_db_connection():
 # 加油站專屬邏輯 (牌價 API 與卡片生成)
 # ==========================================
 def fetch_cpc_prices():
-    """ 透過中油 API 抓取即時牌價 """
-    prices_info = {
-        "92無鉛汽油": "--",
-        "95無鉛汽油": "--",
-        "98無鉛汽油": "--",
-        "超級柴油": "--"
-    }
+    """ 雙軌抓取：優先連線第三方 API，失敗則秒速切換本地備援 JSON """
+    prices_info = FALLBACK_PRICE_DATABASE.copy()
     try:
-        url = "https://vipmbr.cpc.com.tw/openData/api/MainProdListPrice"
-        res = requests.get(url, headers=REQUEST_HEADERS, timeout=3, verify=False)
+        headers = {
+            "Authorization": f"Bearer {SUPERIOR_API_TOKEN}",
+            "User-Agent": "Mozilla/5.0"
+        }
+        res = requests.get(SUPERIOR_API_URL, headers=headers, timeout=3, verify=False)
         if res.status_code == 200:
             data = res.json()
-            for item in data:
-                name = item.get("產品名稱", "")
-                price = item.get("參考牌價", "--")
-                if "92" in name: prices_info["92無鉛汽油"] = price
-                elif "95" in name: prices_info["95無鉛汽油"] = price
-                elif "98" in name: prices_info["98無鉛汽油"] = price
-                elif "柴油" in name: prices_info["超級柴油"] = price
+            # 第三方 API 回傳格式為 {"日期": [{"title": "油品", "price": 價格}, ...]}
+            # 我們抓取字典中的第一個 key（最新日期）對應的陣列
+            if data and isinstance(data, dict):
+                latest_date_key = list(data.keys())[0]
+                price_list = data[latest_date_key]
+                
+                for item in price_list:
+                    name = item.get("title", "")
+                    price = item.get("price", "")
+                    if price:
+                        if "92" in name: prices_info["92無鉛汽油"] = str(price)
+                        elif "95" in name: prices_info["95無鉛汽油"] = str(price)
+                        elif "98" in name: prices_info["98無鉛汽油"] = str(price)
+                        elif "柴油" in name: prices_info["超級柴油"] = str(price)
+            print("【即時油價】成功透過第三方 API 取得線上最新油價。")
+        else:
+             print(f"【即時油價】API 請求失敗狀態碼: {res.status_code}，啟動本地備援。")
     except Exception as e:
-        print(f"中油牌價 API 讀取異常: {e}")
+        print(f"【即時油價】API 連線異常 ({e})，自動啟動備援機制。")
+        
     return prices_info
 
 def build_gas_price_legend_flex():
-    """ 產生【牌價與服務圖例說明】的 Flex Message 卡片 """
     prices = fetch_cpc_prices()
-    
     bubble = {
-        "type": "bubble",
-        "size": "mega",
+        "type": "bubble", "size": "mega",
         "header": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#0288D1",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "⛽ 中油今日主產品牌價",
-                    "color": "#FFFFFF",
-                    "weight": "bold",
-                    "size": "md"
-                }
-            ]
+            "type": "box", "layout": "vertical", "backgroundColor": "#0288D1",
+            "contents": [{"type": "text", "text": "⛽ 中油今日主產品牌價", "color": "#FFFFFF", "weight": "bold", "size": "md"}]
         },
         "body": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
+            "type": "box", "layout": "vertical", "spacing": "sm",
             "contents": [
                 {"type": "text", "text": f"🔹 92無鉛汽油： {prices['92無鉛汽油']} 元/公升", "size": "sm", "weight": "bold"},
                 {"type": "text", "text": f"🔹 95無鉛汽油： {prices['95無鉛汽油']} 元/公升", "size": "sm", "weight": "bold"},
@@ -184,10 +223,8 @@ def build_gas_price_legend_flex():
     return FlexContainer.from_dict(bubble)
 
 def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
-    """ 計算最近加油站並將服務轉為圖例 """
     all_gas = []
     for item in LOCAL_GAS_DATABASE:
-        if not isinstance(item, dict): continue
         raw_lat = str(item.get("緯度") or 0).strip()
         raw_lng = str(item.get("經度") or 0).strip()
         try: lat, lng = float(raw_lat), float(raw_lng)
@@ -196,19 +233,39 @@ def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
         
         dist = calculate_distance(user_latitude, user_longitude, lat, lng)
         
-        raw_name = str(item.get("站名", "未命名加油站")).strip()
-        raw_type = str(item.get("類別", "")).replace("站", "").strip()  # "加盟站" -> "加盟"
-        full_name = f"{raw_name}加油站 ({raw_type})" if raw_type else f"{raw_name}加油站"
+        raw_name = str(item.get("站名", "未命名")).strip()
+        raw_type = str(item.get("類別", "")).strip()
+        
+        brand = "中油"
+        known_brands = ["台糖", "北基", "山隆", "統一", "全國", "福懋", "車亭", "千越", "久井", "統一精工", "台亞"]
+        for b in known_brands:
+            if b in raw_name:
+                brand = b
+                break
+                
+        if "自營" in raw_type: category = "直營"
+        elif "加盟" in raw_type: category = "加盟"
+        elif "漁船" in raw_type: category = "漁船站"
+        else: category = raw_type.replace("站", "")
+            
+        tag = f"({brand}{category})" if category else ""
+        
+        clean_name = raw_name
+        if clean_name.endswith("站") and "加油站" not in clean_name and len(clean_name) > 1:
+            clean_name = clean_name[:-1]
+            
+        if "加油站" not in clean_name:
+            full_name = f"{clean_name}加油站 {tag}".strip()
+        else:
+            full_name = f"{clean_name} {tag}".strip()
         
         hours = str(item.get("營業時間", "未提供")).strip()
         
-        # 轉換服務項目為圖示
         icons = []
         if str(item.get("刷卡自助", "0")) == "1": icons.append("⛽")
         if str(item.get("會員卡", "0")) == "1": icons.append("💳")
         if str(item.get("電子發票", "0")) == "1": icons.append("🧾")
         if item.get("洗車類別") and str(item.get("洗車類別")).strip() != "無": icons.append("🚗")
-        
         icon_str = " ".join(icons) if icons else "無特殊服務"
         
         all_gas.append({
@@ -219,10 +276,14 @@ def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
     all_gas.sort(key=lambda x: x["distance"])
     
     results = []
-    seen = set()
     for item in all_gas:
-        if item["name"] not in seen:
-            seen.add(item["name"])
+        is_dup = False
+        for accepted in results:
+            d = calculate_distance(item["latitude"], item["longitude"], accepted["latitude"], accepted["longitude"])
+            if d < 30.0:
+                is_dup = True
+                break
+        if not is_dup:
             results.append(item)
         if len(results) >= 5: break
     return results
