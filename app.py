@@ -61,7 +61,7 @@ BASE_DIR = os.path.dirname(__file__)
 AED_JSON_PATH = os.path.join(BASE_DIR, "aed_formatted.json")
 TOILET_JSON_PATH = os.path.join(BASE_DIR, "toilet.json")
 WATER_JSON_PATH = os.path.join(BASE_DIR, "water_fountains_fixed_2_completed.json")
-GAS_JSON_PATH = os.path.join(BASE_DIR, "gas_stations.json")
+GAS_JSON_PATH = os.path.join(BASE_DIR, "gas_stations_final_2537_complete.json")
 PRICE_JSON_PATH = os.path.join(BASE_DIR, "sixtypeoillistprice.json")
 BUS_DB_PATH = os.path.join(BASE_DIR, "bus.db")
 BUS_GZ_PATH = os.path.join(BASE_DIR, "bus.db.gz")
@@ -114,29 +114,20 @@ if os.path.exists(PRICE_JSON_PATH):
     except Exception as e:
         print(f"【載入失敗】備援油價讀取異常: {e}")
 
-# 6. 讀取加油站 JSON 並執行「同站代號屬性合併去重」
+# 6. 載入全量優化版加油站資料庫 (2,537 筆)
 if os.path.exists(GAS_JSON_PATH):
     try:
         with open(GAS_JSON_PATH, "r", encoding="utf-8") as f:
             raw_gas_data = json.load(f)
-            merged_gas_db = {}
-            for st in raw_gas_data:
-                if not isinstance(st, dict): continue
-                sid = st.get("站代號")
-                if not sid:
-                    sid = f"{st.get('站名', '')}_{st.get('緯度', '')}"
-                
-                if sid not in merged_gas_db:
-                    merged_gas_db[sid] = st.copy()
-                else:
-                    for key, val in st.items():
-                        old_val = merged_gas_db[sid].get(key)
-                        if str(val) == "1" or (isinstance(val, str) and val.strip() and val.strip() != "無"):
-                            if str(old_val) != "1":
-                                merged_gas_db[sid][key] = val
-
-            LOCAL_GAS_DATABASE = list(merged_gas_db.values())
-            print(f"【成功載入】加油站資料庫共 {len(LOCAL_GAS_DATABASE)} 筆紀錄 (經站點合併優化)。")
+            # 僅保留營業中且座標有效的資料
+            LOCAL_GAS_DATABASE = [
+                st for st in raw_gas_data 
+                if isinstance(st, dict) 
+                and st.get("營業中", 1) == 1 
+                and st.get("經度") is not None 
+                and st.get("緯度") is not None
+            ]
+            print(f"【成功載入】加油站資料庫共 {len(LOCAL_GAS_DATABASE)} 筆有效紀錄。")
     except Exception as e:
         print(f"【載入失敗】加油站讀取異常: {e}")
 
@@ -174,8 +165,6 @@ def fetch_cpc_prices():
         res = requests.get(SUPERIOR_API_URL, headers=headers, timeout=3, verify=False)
         if res.status_code == 200:
             data = res.json()
-            # 第三方 API 回傳格式為 {"日期": [{"title": "油品", "price": 價格}, ...]}
-            # 我們抓取字典中的第一個 key（最新日期）對應的陣列
             if data and isinstance(data, dict):
                 latest_date_key = list(data.keys())[0]
                 price_list = data[latest_date_key]
@@ -214,15 +203,18 @@ def build_gas_price_legend_flex():
                 {"type": "separator", "margin": "md"},
                 {"type": "text", "text": "💡 服務項目圖例說明", "size": "sm", "weight": "bold", "color": "#E65100", "margin": "md"},
                 {"type": "text", "text": "⛽：提供自助加油", "size": "xs", "color": "#666666"},
-                {"type": "text", "text": "💳：接受中油會員卡", "size": "xs", "color": "#666666"},
-                {"type": "text", "text": "🧾：支援電子發票 (載具)", "size": "xs", "color": "#666666"},
-                {"type": "text", "text": "🚗：附設洗車服務", "size": "xs", "color": "#666666"}
+                {"type": "text", "text": "💳：接受中油會員卡 / CPC Pay", "size": "xs", "color": "#666666"},
+                {"type": "text", "text": "🛞：提供獨立電子式充氣設備", "size": "xs", "color": "#666666"},
+                {"type": "text", "text": "🚗：附設洗車服務", "size": "xs", "color": "#666666"},
+                {"type": "text", "text": "🚻：設有獨立無障礙公廁", "size": "xs", "color": "#666666"},
+                {"type": "text", "text": "🛵：附設電動機車充電 / 換電站", "size": "xs", "color": "#666666"}
             ]
         }
     }
     return FlexContainer.from_dict(bubble)
 
 def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
+    """ 依據駕駛用路需求設計的加油站查詢 """
     all_gas = []
     for item in LOCAL_GAS_DATABASE:
         raw_lat = str(item.get("緯度") or 0).strip()
@@ -233,54 +225,71 @@ def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
         
         dist = calculate_distance(user_latitude, user_longitude, lat, lng)
         
-        raw_name = str(item.get("站名", "未命名")).strip()
-        raw_type = str(item.get("類別", "")).strip()
+        # 1. 營運主體與站名修飾
+        operator = str(item.get("營運主體", "")).strip()
+        raw_name = str(item.get("加油站名稱", "未命名加油站")).strip()
         
-        brand = "中油"
-        known_brands = ["台糖", "北基", "山隆", "統一", "全國", "福懋", "車亭", "千越", "久井", "統一精工", "台亞"]
-        for b in known_brands:
-            if b in raw_name:
-                brand = b
-                break
-                
-        if "自營" in raw_type: category = "直營"
-        elif "加盟" in raw_type: category = "加盟"
-        elif "漁船" in raw_type: category = "漁船站"
-        else: category = raw_type.replace("站", "")
-            
-        tag = f"({brand}{category})" if category else ""
+        # 移除重複的「加油站」贅字
+        clean_name = raw_name.replace("加油站", "").strip()
+        full_name = f"{clean_name}加油站 ({operator})" if operator else f"{clean_name}加油站"
         
-        clean_name = raw_name
-        if clean_name.endswith("站") and "加油站" not in clean_name and len(clean_name) > 1:
-            clean_name = clean_name[:-1]
-            
-        if "加油站" not in clean_name:
-            full_name = f"{clean_name}加油站 {tag}".strip()
-        else:
-            full_name = f"{clean_name} {tag}".strip()
-        
+        # 2. 營業時間警示標籤
         hours = str(item.get("營業時間", "未提供")).strip()
+        if hours == "00:00-24:00":
+            hours_display = "🟢 24H 營業"
+        else:
+            hours_display = f"🕒 {hours}"
+            
+        # 3. 支援油品標籤 (92 / 95 / 98 / 柴油)
+        fuels = []
+        if item.get("無鉛92") == 1: fuels.append("92")
+        if item.get("無鉛95") == 1: fuels.append("95")
+        if item.get("無鉛98") == 1: fuels.append("98")
+        if item.get("超柴") == 1: fuels.append("柴油")
+        fuel_str = " | ".join(fuels) if fuels else "未提供油品明細"
         
+        # 4. 實用服務 ICON 圖例化
         icons = []
-        if str(item.get("刷卡自助", "0")) == "1": icons.append("⛽")
-        if str(item.get("會員卡", "0")) == "1": icons.append("💳")
-        if str(item.get("電子發票", "0")) == "1": icons.append("🧾")
-        if item.get("洗車類別") and str(item.get("洗車類別")).strip() != "無": icons.append("🚗")
-        icon_str = " ".join(icons) if icons else "無特殊服務"
+        if item.get("刷卡自助") == 1 or item.get("泵島汽油自助_服務時段"):
+            icons.append("⛽自助")
+        if item.get("獨立電子式充氣") == "有" or item.get("充氣服務_服務時段"):
+            icons.append("🛞充氣")
+        
+        wash_info = item.get("洗車類別") or item.get("洗車_服務時段")
+        if wash_info and str(wash_info).strip() != "無" and str(wash_info).strip() != "":
+            icons.append("🚗洗車")
+            
+        if item.get("獨立無障礙公廁") == "有" or item.get("無障礙公廁_服務時段"):
+            icons.append("🚻無障礙")
+            
+        ev_swap = item.get("電動機車換電服務_服務時段") or item.get("電動機車服務_服務時段")
+        if ev_swap and str(ev_swap).strip() != "":
+            icons.append("🛵換電站")
+            
+        icon_str = " ｜ ".join(icons) if icons else "無特殊附加服務"
+        
+        # 5. 特殊備註資訊 (如：特別管制站或加油受限)
+        note = item.get("備註", "").strip()
+        extra_note = f"\n⚠️ 備註：{note}" if note else ""
         
         all_gas.append({
-            "name": full_name, "type": "⛽ 加油站", "latitude": lat, "longitude": lng,
-            "distance": round(dist), "extra_info": f"🕒 營業：{hours}\n✅ 服務：{icon_str}"
+            "name": full_name, 
+            "type": "⛽ 加油站", 
+            "latitude": lat, 
+            "longitude": lng,
+            "distance": round(dist), 
+            "extra_info": f"{hours_display}\n⛽ 油品：{fuel_str}\n💡 服務：{icon_str}{extra_note}"
         })
         
     all_gas.sort(key=lambda x: x["distance"])
     
+    # 6. 空間去重防線 (避免相同座標或近距離 duplicate 站點)
     results = []
     for item in all_gas:
         is_dup = False
         for accepted in results:
             d = calculate_distance(item["latitude"], item["longitude"], accepted["latitude"], accepted["longitude"])
-            if d < 30.0:
+            if d < 30.0:  # 30公尺內視為同一實體站點
                 is_dup = True
                 break
         if not is_dup:
