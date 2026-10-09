@@ -41,7 +41,7 @@ REQUEST_HEADERS = {
 
 # 第三方油價 API 設定
 SUPERIOR_API_URL = "https://superiorapis-creator.cteam.com.tw/manager/feature/proxy/ab930e2f2d73/pub_ab931a177e6e"
-SUPERIOR_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJjZXJ0IjoiOTFmZmFiYjk1ZjE2MzA0MzAwNTEyMzliZmNjZDc1YTUxN2I0M2UyNSIsImlhdCI6MTc5MDUyMTU3MH0.H0v3fDWq4iEoUt6VOUc3rH3siYV6VKcDRjM_IKoeOfE"
+SUPERIOR_API_TOKEN = (os.getenv('SUPERIOR_API_TOKEN') or '').strip()
 
 # ==========================================
 # 核心載入：啟動時將本地資料庫載入記憶體
