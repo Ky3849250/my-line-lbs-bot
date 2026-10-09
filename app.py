@@ -12,7 +12,6 @@ import sys
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
-from datetime import datetime
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -47,6 +46,7 @@ LOCAL_TOILET_DATABASE = []
 LOCAL_WATER_DATABASE = []
 LOCAL_GAS_DATABASE = []
 
+# 預設正確油價基準點
 FALLBACK_PRICE_DATABASE = {
     "92無鉛汽油": "31.2",
     "95無鉛汽油": "32.7",
@@ -94,40 +94,48 @@ if os.path.exists(WATER_JSON_PATH):
             LOCAL_WATER_DATABASE = json.load(f)
     except Exception: pass
 
-# 5. 載入備援油價 JSON
+# 5. 載入備援油價 JSON (加入「防開機污染」邏輯驗證)
 if os.path.exists(PRICE_JSON_PATH):
     try:
         with open(PRICE_JSON_PATH, "r", encoding="utf-8") as f:
             price_data = json.load(f)
+            temp_startup_prices = {}
             for item in price_data:
                 p_name = item.get("產品名稱", "")
                 p_val = item.get("參考牌價_金額")
                 if p_val:
-                    if "92" in p_name: FALLBACK_PRICE_DATABASE["92無鉛汽油"] = str(p_val)
-                    elif "95" in p_name: FALLBACK_PRICE_DATABASE["95無鉛汽油"] = str(p_val)
-                    elif "98" in p_name: FALLBACK_PRICE_DATABASE["98無鉛汽油"] = str(p_val)
-                    elif "超級柴油" in p_name: FALLBACK_PRICE_DATABASE["超級柴油"] = str(p_val)
-        print("【成功載入】離線備援油價資料庫。", flush=True)
+                    try:
+                        val_float = float(p_val)
+                        if "92" in p_name: temp_startup_prices["92無鉛汽油"] = val_float
+                        elif "95" in p_name: temp_startup_prices["95無鉛汽油"] = val_float
+                        elif "98" in p_name: temp_startup_prices["98無鉛汽油"] = val_float
+                        elif "超級柴油" in p_name: temp_startup_prices["超級柴油"] = val_float
+                    except (ValueError, TypeError): pass
+            
+            p92 = temp_startup_prices.get("92無鉛汽油", 0)
+            p95 = temp_startup_prices.get("95無鉛汽油", 0)
+            # 只有當 95 > 92 且價差合理時，才允許覆蓋預設備援庫，防止 22.9 舊數據污染開機值
+            if p92 > 20.0 and p95 > p92 and (1.0 <= (p95 - p92) <= 2.5):
+                for k, v in temp_startup_prices.items():
+                    FALLBACK_PRICE_DATABASE[k] = f"{v:.1f}"
+                print("【成功載入】離線備援油價資料庫 (已通過邏輯校驗)。", flush=True)
+            else:
+                print("【防護啟動】離線備援 JSON 數據異常 (含舊值污染)，保持預設正確油價 (32.7元/公升)。", flush=True)
     except Exception as e:
         print(f"【載入失敗】備援油價讀取異常: {e}", flush=True)
 
-# 6. 載入全量優化版加油站資料庫（含全欄位容錯解析）
+# 6. 載入全量優化版加油站資料庫
 if os.path.exists(GAS_JSON_PATH):
     try:
         with open(GAS_JSON_PATH, "r", encoding="utf-8") as f:
             raw_gas_data = json.load(f)
-            
             valid_gas = []
             for st in raw_gas_data:
                 if not isinstance(st, dict): continue
-                
-                # 容錯讀取經緯度
                 raw_lat = st.get("緯度") or st.get("latitude") or st.get("lat") or st.get("Py")
                 raw_lng = st.get("經度") or st.get("longitude") or st.get("lng") or st.get("Px")
-                
                 if raw_lat is not None and raw_lng is not None:
                     valid_gas.append(st)
-                    
             LOCAL_GAS_DATABASE = valid_gas
             print(f"【成功載入】加油站資料庫共 {len(LOCAL_GAS_DATABASE)} 筆有效紀錄。", flush=True)
     except Exception as e:
@@ -153,7 +161,7 @@ def get_db_connection():
     return conn
 
 def parse_date_key(date_str):
-    """嘗試將各式日期字串解析為 datetime 物件以進行精確時間排序"""
+    """解析各式日期字串為 datetime 物件以進行精確時間降序排序"""
     for fmt in ["%Y/%m/%d", "%Y-%m-%d", "%Y%m%d", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y"]:
         try:
             return datetime.strptime(str(date_str).strip(), fmt)
@@ -162,7 +170,7 @@ def parse_date_key(date_str):
     return datetime.min
 
 def fetch_cpc_prices():
-    """雙軌抓取：優先連線第三方 API 並進行真正的 datetime 時間排序與油價邏輯驗證，失敗則切換本地備援"""
+    """雙軌抓取：優先連線 API 並進行 datetime 時間排序與 95 > 92 邏輯校驗，失敗則強制退回正確備援"""
     prices_info = FALLBACK_PRICE_DATABASE.copy()
     try:
         headers = {
@@ -173,39 +181,39 @@ def fetch_cpc_prices():
         if res.status_code == 200:
             data = res.json()
             if data and isinstance(data, dict):
-                # 1. 使用真正的 datetime 物件進行日期排序 (確保抓到最新日期)
+                # 精確以 datetime 物件降序排序，確保取得最新日期
                 sorted_date_keys = sorted(data.keys(), key=parse_date_key, reverse=True)
-                latest_date_key = sorted_date_keys[0]
-                price_list = data[latest_date_key]
-                
-                temp_prices = {}
-                for item in price_list:
-                    name = str(item.get("title", ""))
-                    try:
-                        price_val = float(item.get("price", 0))
-                    except (ValueError, TypeError):
-                        continue
+                if sorted_date_keys:
+                    latest_date_key = sorted_date_keys[0]
+                    price_list = data[latest_date_key]
                     
-                    if price_val > 0:
-                        if "92" in name: temp_prices["92無鉛汽油"] = price_val
-                        elif "95" in name: temp_prices["95無鉛汽油"] = price_val
-                        elif "98" in name: temp_prices["98無鉛汽油"] = price_val
-                        elif "柴油" in name: temp_prices["超級柴油"] = price_val
-                
-                p92 = temp_prices.get("92無鉛汽油", 0)
-                p95 = temp_prices.get("95無鉛汽油", 0)
-                
-                # 2. 嚴格交叉驗證油價邏輯 (95 必須大於 92，且價差在 1.0 ~ 2.5 元之間)
-                if p92 > 20.0 and p95 > p92 and (1.0 <= (p95 - p92) <= 2.5):
-                    for k, v in temp_prices.items():
-                        prices_info[k] = f"{v:.1f}"
-                    print(f"【即時油價】成功取得並通過邏輯驗證之最新油價 (日期: {latest_date_key})。", flush=True)
-                else:
-                    print(f"【即時油價】第三方 API 油價數據異常 (95={p95}, 92={p92} 邏輯不符)，強制啟動備援資料庫。", flush=True)
+                    temp_prices = {}
+                    for item in price_list:
+                        name = str(item.get("title", ""))
+                        try:
+                            price_val = float(item.get("price", 0))
+                        except (ValueError, TypeError):
+                            continue
+                        
+                        if price_val > 0:
+                            if "92" in name: temp_prices["92無鉛汽油"] = price_val
+                            elif "95" in name: temp_prices["95無鉛汽油"] = price_val
+                            elif "98" in name: temp_prices["98無鉛汽油"] = price_val
+                            elif "柴油" in name: temp_prices["超級柴油"] = price_val
+                    
+                    p92 = temp_prices.get("92無鉛汽油", 0)
+                    p95 = temp_prices.get("95無鉛汽油", 0)
+                    
+                    # 強制邏輯校驗：95 必須大於 92，且價差在 1.0 ~ 2.5 元之間
+                    if p92 > 20.0 and p95 > p92 and (1.0 <= (p95 - p92) <= 2.5):
+                        for k, v in temp_prices.items():
+                            prices_info[k] = f"{v:.1f}"
+                        print(f"【即時油價】成功取得並通過邏輯校驗之最新油價 (日期: {latest_date_key})。", flush=True)
+                    else:
+                        print(f"【即時油價】第三方 API 油價數據異常 (95={p95}, 92={p92} 不符邏輯)，強制啟動正確備援 (32.7元)。", flush=True)
     except Exception as e:
         print(f"【即時油價】API 連線異常 ({e})，自動啟動備援機制。", flush=True)
     return prices_info
-
 
 def build_gas_price_legend_flex():
     prices = fetch_cpc_prices()
@@ -237,7 +245,6 @@ def build_gas_price_legend_flex():
 def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
     all_gas = []
     for item in LOCAL_GAS_DATABASE:
-        # 相容多種 Key 讀取經緯度
         raw_lat = str(item.get("緯度") or item.get("latitude") or item.get("lat") or item.get("Py") or 0).strip()
         raw_lng = str(item.get("經度") or item.get("longitude") or item.get("lng") or item.get("Px") or 0).strip()
         
@@ -298,6 +305,18 @@ def fetch_gas_station_data(user_latitude: float, user_longitude: float) -> list:
         
     return results
 
+def get_stop_direction_hint(stop_name: str, passing_routes: list) -> str:
+    next_stops = []
+    for r in passing_routes:
+        stops = r.get('RouteStops', [])
+        if stop_name in stops:
+            idx = stops.index(stop_name)
+            if idx + 1 < len(stops):
+                next_stops.append(str(stops[idx + 1]))
+    unique_nexts = list(dict.fromkeys(next_stops))[:2]
+    if unique_nexts: return f"🚏 下一站：{'/'.join(unique_nexts)}"
+    return "路線終點站"
+
 def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
     if not os.path.exists(BUS_DB_PATH): return []
     try:
@@ -354,6 +373,8 @@ def fetch_bus_data(user_latitude: float, user_longitude: float) -> list:
                     'latitude': item_lat, 'longitude': item_lon, 'distance': round(item['dist']),
                     'passing_routes': passing_routes, 'seen_routes': seen_routes, 'stop_uids_map': stop_uids_map
                 })
+        for card in grouped_cards:
+            card['dir_hint'] = get_stop_direction_hint(card['name'], card['passing_routes'])
         grouped_cards.sort(key=lambda x: x['distance'])
         return grouped_cards[:5]
     except Exception as e:
@@ -457,7 +478,7 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
             st_lng = float(station.get("longitude") or station.get("lng") or 0)
             if st_lat == 0 or st_lng == 0: continue
             dist = calculate_distance(user_latitude, user_longitude, st_lat, st_lng)
-            if dist <= 5000.0: # 擴大至 5 公里
+            if dist <= 5000.0:
                 name = str(station.get("sna", "YouBike")).replace("YouBike2.0_", "")
                 av = int(station.get("available_rent_bikes") or station.get("sbi") or 0)
                 em = int(station.get("available_return_bikes") or station.get("bemp") or 0)
@@ -557,10 +578,50 @@ def handle_location_message(event):
 
                 body_contents = [
                     {"type": "text", "text": str(item["type"]), "weight": "bold", "size": "xs", "color": "#0288D1"},
-                    {"type": "text", "text": str(item["name"]), "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
-                    {"type": "text", "text": f"📏 距離: 約 {item['distance']} 公尺", "size": "xs", "color": "#888888"},
-                    {"type": "text", "text": str(item.get("extra_info", "")), "size": "sm", "color": "#333333", "margin": "md", "wrap": True}
+                    {"type": "text", "text": str(item["name"]), "weight": "bold", "size": "md", "margin": "xs", "wrap": True}
                 ]
+                
+                # 專屬呈現公車站牌方向指引
+                if item.get("dir_hint"):
+                    body_contents.append({"type": "text", "text": str(item["dir_hint"]), "size": "xs", "color": "#E65100", "weight": "bold", "margin": "xs"})
+
+                body_contents.append({"type": "text", "text": f"📏 距離: 約 {item['distance']} 公尺", "size": "xs", "color": "#888888"})
+
+                # 處理公車站牌按鈕雙欄網格
+                if target_type == "公車站牌":
+                    routes_list = item.get('passing_routes', [])
+                    display_routes = routes_list[:6]
+                    route_chunks = [display_routes[i:i+2] for i in range(0, len(display_routes), 2)]
+                    route_rows = []
+                    for chunk in route_chunks:
+                        row_contents = []
+                        for r in chunk:
+                            r_name, d_code = str(r.get('RouteName', '')), str(r.get('Direction', '0'))
+                            dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
+                            route_key = f"{r_name}_{d_code}"
+                            specific_uid = str(item.get('stop_uids_map', {}).get(route_key, item['uid']))
+                            btn_label = f"{r_name}({dir_label})"[:20]
+                            row_contents.append({
+                                "type": "box", "layout": "vertical", "backgroundColor": "#F0F4F8", "cornerRadius": "md", "paddingAll": "sm", "flex": 1,
+                                "action": {"type": "postback", "label": btn_label, "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"},
+                                "contents": [{"type": "text", "text": f"🚌 {r_name} ({dir_label})", "size": "xs", "color": "#1E88E5", "align": "center", "weight": "bold", "wrap": True}]
+                            })
+                        if len(chunk) == 1:
+                            row_contents.append({"type": "box", "layout": "vertical", "flex": 1, "contents": [{"type": "filler"}]})
+                        route_rows.append({"type": "box", "layout": "horizontal", "spacing": "sm", "margin": "xs", "contents": row_contents})
+                    
+                    if route_rows:
+                        extra_button = []
+                        if len(routes_list) > 6:
+                            btn_text = f"🔍 查看全站{len(routes_list)}條車班"
+                            extra_button.append({
+                                "type": "button",
+                                "action": {"type": "postback", "label": btn_text[:20], "data": f"action=all_bus_routes&uid={item['uid']}&stop_name={urllib.parse.quote(item['name'])}"},
+                                "style": "secondary", "height": "sm", "margin": "sm"
+                            })
+                        body_contents.append({"type": "box", "layout": "vertical", "margin": "md", "spacing": "xs", "contents": [{"type": "text", "text": "點擊車班查看路線時間軸:", "size": "xs", "color": "#555555"}, *route_rows, *extra_button]})
+                else:
+                    body_contents.append({"type": "text", "text": str(item.get("extra_info", "")), "size": "sm", "color": "#333333", "margin": "md", "wrap": True})
 
                 bubble = {
                     "type": "bubble", "size": "mega",
@@ -589,3 +650,139 @@ def handle_location_message(event):
             MessagingApi(api_client).reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text="查詢過程發生錯誤，請稍後再試。")])
             )
+
+@handler.add(PostbackEvent)
+def handle_postback(event):
+    try:
+        data = event.postback.data
+        parsed = urllib.parse.parse_qs(data)
+        action = parsed.get('action', [''])[0]
+        
+        if action == 'all_bus_routes':
+            uid = parsed.get('uid', [''])[0]
+            raw_stop_name = parsed.get('stop_name', [''])[0]
+            try: stop_name = urllib.parse.unquote(raw_stop_name)
+            except Exception: stop_name = raw_stop_name
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM bus_stops WHERE stop_uid=? OR stop_name=?', (uid, stop_name))
+            rows = cursor.fetchall()
+            conn.close()
+            
+            if not rows: return
+            actual_stop_name = str(rows[0]['stop_name']) if rows else stop_name
+            all_routes, seen_keys, stop_uids_map = [], set(), {}
+            for r_row in rows:
+                try: r_json = json.loads(r_row['passing_routes']) if r_row['passing_routes'] else []
+                except Exception: r_json = []
+                for r in r_json:
+                    if not isinstance(r, dict): continue
+                    r_name, d_code = str(r.get('RouteName', '')).strip(), str(r.get('Direction', '0'))
+                    if not r_name: continue
+                    route_key = f"{r_name}_{d_code}"
+                    if route_key not in seen_keys:
+                        seen_keys.add(route_key)
+                        all_routes.append(r)
+                        stop_uids_map[route_key] = str(r_row['stop_uid'])
+            
+            display_all_routes = all_routes[:30]
+            route_chunks = [display_all_routes[i:i+2] for i in range(0, len(display_all_routes), 2)]
+            route_rows = []
+            for chunk in route_chunks:
+                row_contents = []
+                for r in chunk:
+                    r_name, d_code = str(r.get('RouteName', '')), str(r.get('Direction', '0'))
+                    dir_label = "去" if d_code == "0" else "回" if d_code == "1" else "單"
+                    route_key = f"{r_name}_{d_code}"
+                    specific_uid = stop_uids_map.get(route_key, uid)
+                    btn_label = f"{r_name}({dir_label})"[:20]
+                    row_contents.append({
+                        "type": "box", "layout": "vertical", "backgroundColor": "#F0F4F8", "cornerRadius": "md", "paddingAll": "sm", "flex": 1,
+                        "action": {"type": "postback", "label": btn_label, "data": f"action=bus_route&uid={specific_uid}&route={urllib.parse.quote(r_name)}&dir={d_code}"},
+                        "contents": [{"type": "text", "text": f"🚌 {r_name} ({dir_label})", "size": "xs", "color": "#1E88E5", "align": "center", "weight": "bold", "wrap": True}]
+                    })
+                if len(chunk) == 1:
+                    row_contents.append({"type": "box", "layout": "vertical", "flex": 1, "contents": [{"type": "filler"}]})
+                route_rows.append({"type": "box", "layout": "horizontal", "spacing": "sm", "margin": "xs", "contents": row_contents})
+                
+            bubble = {
+                "type": "bubble", "size": "mega",
+                "header": {
+                    "type": "box", "layout": "vertical", "backgroundColor": "#FF9900",
+                    "contents": [{"type": "text", "text": f"🚏 【{actual_stop_name}】全站車班 ({len(all_routes)}條)", "color": "#FFFFFF", "weight": "bold"}]
+                },
+                "body": {
+                    "type": "box", "layout": "vertical",
+                    "contents": [
+                        {"type": "text", "text": "點擊車班查看路線時間軸:", "size": "xs", "color": "#555555"},
+                        {"type": "box", "layout": "vertical", "margin": "md", "contents": route_rows}
+                    ]
+                }
+            }
+            with ApiClient(configuration) as api_client:
+                MessagingApi(api_client).reply_message_with_http_info(
+                    ReplyMessageRequest(reply_token=event.reply_token, messages=[FlexMessage(alt_text=f"{actual_stop_name}全車班選單", contents=FlexContainer.from_dict(bubble))])
+                )
+
+        elif action == 'bus_route':
+            uid = parsed.get('uid', [''])[0]
+            raw_route = parsed.get('route', [''])[0]
+            try: route_name = urllib.parse.unquote(raw_route)
+            except Exception: route_name = raw_route
+            dir_code = parsed.get('dir', [''])[0]
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT stop_name, passing_routes FROM bus_stops WHERE stop_uid=?', (uid,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row: return
+            
+            current_stop_name = str(row['stop_name'])
+            try: routes = json.loads(row['passing_routes']) if row['passing_routes'] else []
+            except Exception: routes = []
+            
+            target_route = None
+            for r in routes:
+                if not isinstance(r, dict): continue
+                if str(r.get('RouteName', '')) == route_name and str(r.get('Direction', '')) == dir_code:
+                    target_route = r; break
+            if not target_route: return
+            
+            stops_list = target_route.get('RouteStops', [])
+            try: current_idx = stops_list.index(current_stop_name)
+            except ValueError: current_idx = 0
+            
+            start_idx, end_idx = 0, len(stops_list)
+            if len(stops_list) > 95:
+                start_idx, end_idx = max(0, current_idx - 40), min(len(stops_list), start_idx + 95)
+            
+            timeline_contents = []
+            if start_idx > 0: timeline_contents.append({"type": "text", "text": f"↑ ...省略前方 {start_idx} 站", "color": "#888888", "size": "xs"})
+            
+            for i in range(start_idx, end_idx):
+                s_name = str(stops_list[i])
+                icon = " 🚇" if any(k in s_name for k in ["捷運", "MRT"]) else " 🚆" if any(k in s_name for k in ["火車", "車站", "台鐵"]) else " 🚄" if "高鐵" in s_name else ""
+                
+                if i < current_idx: timeline_contents.append({"type": "text", "text": f"⚪ {s_name}{icon}", "color": "#BDBDBD", "weight": "regular", "size": "sm", "margin": "xs"})
+                elif i == current_idx: timeline_contents.append({"type": "text", "text": f"📍 {s_name}{icon} (當前站)", "color": "#FF0000", "weight": "bold", "size": "md", "margin": "xs"})
+                else: timeline_contents.append({"type": "text", "text": f"🔵 {s_name}{icon}", "color": "#333333", "weight": "regular", "size": "sm", "margin": "xs"})
+                
+            if end_idx < len(stops_list): timeline_contents.append({"type": "text", "text": f"↓ ...以及後續 {len(stops_list) - end_idx} 站", "color": "#888888", "size": "xs", "margin": "sm"})
+            
+            dir_label = "去程" if dir_code == "0" else "回程" if dir_code == "1" else "單向"
+            bubble = {
+                "type": "bubble", "size": "mega",
+                "header": {"type": "box", "layout": "vertical", "backgroundColor": "#FF9900", "contents": [{"type": "text", "text": f"🚌 {route_name} ({dir_label})", "color": "#FFFFFF", "weight": "bold"}]},
+                "body": {"type": "box", "layout": "vertical", "contents": timeline_contents}
+            }
+            with ApiClient(configuration) as api_client:
+                MessagingApi(api_client).reply_message_with_http_info(
+                    ReplyMessageRequest(reply_token=event.reply_token, messages=[FlexMessage(alt_text=f"{route_name}路線圖", contents=FlexContainer.from_dict(bubble))])
+                )
+    except Exception as e:
+        print(f"【Postback 例外】:\n{traceback.format_exc()}", flush=True)
+
+if __name__ == "__main__":
+    app.run(port=5000)
