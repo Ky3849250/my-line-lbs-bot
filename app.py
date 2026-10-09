@@ -525,51 +525,53 @@ def callback():
     return 'OK'
 
 
-@handler.add(MessageEvent, message=LocationMessageContent)
-def handle_location_message(event):
-    user_id = event.source.user_id
-    user_latitude = event.message.latitude
-    user_longitude = event.message.longitude
-    target_type = user_search_state.get(user_id, "公廁")
-    
-    # 【加入這行 Debug 日誌】
-    print(f"【定位 Debug】項目: {target_type} | 收到座標: Lat={user_latitude}, Lng={user_longitude}")
-    
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text_message(event):
     try:
-    # 判斷使用者選擇的設施類型
-    if any(k in user_text for k in ["加油", "汽油", "中油", "95", "92", "柴油"]): target_type = "加油站"
-    elif any(k in user_text for k in ["公車", "站牌", "搭車", "客運"]): target_type = "公車站牌"
-    elif any(k in user_text for k in ["公廁", "廁所", "洗手間", "尿尿"]): target_type = "公廁"
-    elif any(k in user_text for k in ["飲水機", "喝水", "裝水"]): target_type = "飲水機"
-    elif "AED" in user_text.upper() or "急救" in user_text: target_type = "AED"
-    elif any(k in user_text.lower() for k in ["youbike", "腳踏車", "單車", "ubike"]): target_type = "YouBike"
-    else: 
-        # 【修改重點】如果輸入的文字不屬於以上任何一種，則回傳防呆提示並結束
+        user_id = event.source.user_id
+        user_text = event.message.text
+        
+        # 判斷使用者選擇的設施類型
+        if any(k in user_text for k in ["加油", "汽油", "中油", "95", "92", "柴油"]): 
+            target_type = "加油站"
+        elif any(k in user_text for k in ["公車", "站牌", "搭車", "客運"]): 
+            target_type = "公車站牌"
+        elif any(k in user_text for k in ["公廁", "廁所", "洗手間", "尿尿"]): 
+            target_type = "公廁"
+        elif any(k in user_text for k in ["飲水機", "喝水", "裝水"]): 
+            target_type = "飲水機"
+        elif "AED" in user_text.upper() or "急救" in user_text: 
+            target_type = "AED"
+        elif any(k in user_text.lower() for k in ["youbike", "腳踏車", "單車", "ubike"]): 
+            target_type = "YouBike"
+        else: 
+            # 未配對到關鍵字時回傳防呆提示
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                fallback_text = "本服務未提供文字搜尋功能，請點選下方「圖文選單」選擇您想查詢的設施唷！\n\n如有問題或建議，可回報至：service@example.com"
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=fallback_text)]
+                    )
+                )
+            return
+
+        user_search_state[user_id] = target_type
+        
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            fallback_text = "本服務未提供文字搜尋功能，請點選下方「圖文選單」選擇您想查詢的設施唷！\n\n如有問題或建議，可回報至：https://forms.gle/95tuL6WwwW1ZwsQ19"
+            quick_reply_buttons = QuickReply(items=[QuickReplyItem(action=LocationAction(label="📍 傳送目前位置"))])
+            reply_text_message = f"您想尋找【{target_type}】！\n請點擊下方按鈕傳送位置："
+            
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=fallback_text)]
+                    messages=[TextMessage(text=reply_text_message, quick_reply=quick_reply_buttons)]
                 )
             )
-        return
-
-    # 若有成功配對到 6 大設施，才記錄狀態並發送定位按鈕
-    user_search_state[user_id] = target_type
-    
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        quick_reply_buttons = QuickReply(items=[QuickReplyItem(action=LocationAction(label="📍 傳送目前位置"))])
-        reply_text_message = f"您想尋找【{target_type}】！\n請點擊下方按鈕傳送位置："
-        
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text_message, quick_reply=quick_reply_buttons)]
-            )
-        )
+    except Exception as e:
+        print(f"【handle_text_message 發生異常】: {e}")
 
 
 @handler.add(MessageEvent, message=LocationMessageContent)
