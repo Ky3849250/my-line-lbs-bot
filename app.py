@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, render_template
 from dotenv import load_dotenv
+from datetime import datetime
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -151,8 +152,17 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def parse_date_key(date_str):
+    """嘗試將各式日期字串解析為 datetime 物件以進行精確時間排序"""
+    for fmt in ["%Y/%m/%d", "%Y-%m-%d", "%Y%m%d", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y"]:
+        try:
+            return datetime.strptime(str(date_str).strip(), fmt)
+        except ValueError:
+            pass
+    return datetime.min
+
 def fetch_cpc_prices():
-    """雙軌抓取：優先連線第三方 API 並進行最新日期排序與價格合理性檢查，失敗則切換本地備援"""
+    """雙軌抓取：優先連線第三方 API 並進行真正的 datetime 時間排序與油價邏輯驗證，失敗則切換本地備援"""
     prices_info = FALLBACK_PRICE_DATABASE.copy()
     try:
         headers = {
@@ -163,8 +173,8 @@ def fetch_cpc_prices():
         if res.status_code == 200:
             data = res.json()
             if data and isinstance(data, dict):
-                # 1. 依據日期字串由新到舊排序 (Reverse Sort)，確保抓到真正的最新日期
-                sorted_date_keys = sorted(data.keys(), reverse=True)
+                # 1. 使用真正的 datetime 物件進行日期排序 (確保抓到最新日期)
+                sorted_date_keys = sorted(data.keys(), key=parse_date_key, reverse=True)
                 latest_date_key = sorted_date_keys[0]
                 price_list = data[latest_date_key]
                 
@@ -176,22 +186,26 @@ def fetch_cpc_prices():
                     except (ValueError, TypeError):
                         continue
                     
-                    # 2. 加入價格合理性檢查 (20 ~ 50 元之間)
-                    if 20.0 <= price_val <= 50.0:
-                        if "92" in name: temp_prices["92無鉛汽油"] = f"{price_val:.1f}"
-                        elif "95" in name: temp_prices["95無鉛汽油"] = f"{price_val:.1f}"
-                        elif "98" in name: temp_prices["98無鉛汽油"] = f"{price_val:.1f}"
-                        elif "柴油" in name: temp_prices["超級柴油"] = f"{price_val:.1f}"
+                    if price_val > 0:
+                        if "92" in name: temp_prices["92無鉛汽油"] = price_val
+                        elif "95" in name: temp_prices["95無鉛汽油"] = price_val
+                        elif "98" in name: temp_prices["98無鉛汽油"] = price_val
+                        elif "柴油" in name: temp_prices["超級柴油"] = price_val
                 
-                # 只有當主要油品 (92/95/98) 均解析成功且價格合理時，才進行覆蓋
-                if "95無鉛汽油" in temp_prices and "92無鉛汽油" in temp_prices:
-                    prices_info.update(temp_prices)
-                    print(f"【即時油價】成功透過第三方 API 取得最新油價 (日期: {latest_date_key})。", flush=True)
+                p92 = temp_prices.get("92無鉛汽油", 0)
+                p95 = temp_prices.get("95無鉛汽油", 0)
+                
+                # 2. 嚴格交叉驗證油價邏輯 (95 必須大於 92，且價差在 1.0 ~ 2.5 元之間)
+                if p92 > 20.0 and p95 > p92 and (1.0 <= (p95 - p92) <= 2.5):
+                    for k, v in temp_prices.items():
+                        prices_info[k] = f"{v:.1f}"
+                    print(f"【即時油價】成功取得並通過邏輯驗證之最新油價 (日期: {latest_date_key})。", flush=True)
                 else:
-                    print(f"【即時油價】第三方 API 油價數據異常 (包含不合理數值)，啟動本地備援。", flush=True)
+                    print(f"【即時油價】第三方 API 油價數據異常 (95={p95}, 92={p92} 邏輯不符)，強制啟動備援資料庫。", flush=True)
     except Exception as e:
         print(f"【即時油價】API 連線異常 ({e})，自動啟動備援機制。", flush=True)
     return prices_info
+
 
 def build_gas_price_legend_flex():
     prices = fetch_cpc_prices()
