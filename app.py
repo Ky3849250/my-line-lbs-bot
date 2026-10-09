@@ -511,6 +511,11 @@ def fetch_youbike_data(user_latitude: float, user_longitude: float) -> list:
 def liff_map_page():
     return render_template("map.html")
 
+@app.route("/health", methods=['GET'])
+def health_check():
+    """專供 UptimeRobot 或監控服務使用的輕量保鮮端點"""
+    return 'OK', 200
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
