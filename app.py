@@ -152,6 +152,7 @@ def get_db_connection():
     return conn
 
 def fetch_cpc_prices():
+    """雙軌抓取：優先連線第三方 API 並進行最新日期排序與價格合理性檢查，失敗則切換本地備援"""
     prices_info = FALLBACK_PRICE_DATABASE.copy()
     try:
         headers = {
@@ -162,17 +163,32 @@ def fetch_cpc_prices():
         if res.status_code == 200:
             data = res.json()
             if data and isinstance(data, dict):
-                latest_date_key = list(data.keys())[0]
+                # 1. 依據日期字串由新到舊排序 (Reverse Sort)，確保抓到真正的最新日期
+                sorted_date_keys = sorted(data.keys(), reverse=True)
+                latest_date_key = sorted_date_keys[0]
                 price_list = data[latest_date_key]
+                
+                temp_prices = {}
                 for item in price_list:
-                    name = item.get("title", "")
-                    price = item.get("price", "")
-                    if price:
-                        if "92" in name: prices_info["92無鉛汽油"] = str(price)
-                        elif "95" in name: prices_info["95無鉛汽油"] = str(price)
-                        elif "98" in name: prices_info["98無鉛汽油"] = str(price)
-                        elif "柴油" in name: prices_info["超級柴油"] = str(price)
-                print("【即時油價】成功透過第三方 API 取得線上最新油價。", flush=True)
+                    name = str(item.get("title", ""))
+                    try:
+                        price_val = float(item.get("price", 0))
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    # 2. 加入價格合理性檢查 (20 ~ 50 元之間)
+                    if 20.0 <= price_val <= 50.0:
+                        if "92" in name: temp_prices["92無鉛汽油"] = f"{price_val:.1f}"
+                        elif "95" in name: temp_prices["95無鉛汽油"] = f"{price_val:.1f}"
+                        elif "98" in name: temp_prices["98無鉛汽油"] = f"{price_val:.1f}"
+                        elif "柴油" in name: temp_prices["超級柴油"] = f"{price_val:.1f}"
+                
+                # 只有當主要油品 (92/95/98) 均解析成功且價格合理時，才進行覆蓋
+                if "95無鉛汽油" in temp_prices and "92無鉛汽油" in temp_prices:
+                    prices_info.update(temp_prices)
+                    print(f"【即時油價】成功透過第三方 API 取得最新油價 (日期: {latest_date_key})。", flush=True)
+                else:
+                    print(f"【即時油價】第三方 API 油價數據異常 (包含不合理數值)，啟動本地備援。", flush=True)
     except Exception as e:
         print(f"【即時油價】API 連線異常 ({e})，自動啟動備援機制。", flush=True)
     return prices_info
