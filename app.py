@@ -525,11 +525,17 @@ def callback():
     return 'OK'
 
 
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_text_message(event):
+@handler.add(MessageEvent, message=LocationMessageContent)
+def handle_location_message(event):
     user_id = event.source.user_id
-    user_text = event.message.text
+    user_latitude = event.message.latitude
+    user_longitude = event.message.longitude
+    target_type = user_search_state.get(user_id, "公廁")
     
+    # 【加入這行 Debug 日誌】
+    print(f"【定位 Debug】項目: {target_type} | 收到座標: Lat={user_latitude}, Lng={user_longitude}")
+    
+    try:
     # 判斷使用者選擇的設施類型
     if any(k in user_text for k in ["加油", "汽油", "中油", "95", "92", "柴油"]): target_type = "加油站"
     elif any(k in user_text for k in ["公車", "站牌", "搭車", "客運"]): target_type = "公車站牌"
